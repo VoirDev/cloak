@@ -1,0 +1,86 @@
+name: Prepare Release
+
+# Opens the reviewed release pull request: release/vX.Y.Z changing VERSION. Nothing is built or
+# published here: the pull request's Verify run builds the release, and merging it publishes that
+# (publish-release.yml). docs/development.md#releases.
+#
+# Needs the secret RELEASE_BOT_TOKEN and the variables RELEASE_BOT_NAME and RELEASE_BOT_EMAIL: a pull
+# request opened with the workflow's own token would start no workflow, so Verify would never check
+# the release.
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: Version bump type
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prepare-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare release PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Validate source branch and release configuration
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_BOT_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
+          RELEASE_BOT_NAME: ${{ vars.RELEASE_BOT_NAME }}
+          RELEASE_BOT_EMAIL: ${{ vars.RELEASE_BOT_EMAIL }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ]; then
+            echo "::error::Prepare Release must run from $DEFAULT_BRANCH, not $GITHUB_REF_NAME."
+            exit 1
+          fi
+          if [ -z "$RELEASE_BOT_TOKEN" ] || [ -z "$RELEASE_BOT_NAME" ] || [ -z "$RELEASE_BOT_EMAIL" ]; then
+            echo "::error::Set the RELEASE_BOT_TOKEN secret and the RELEASE_BOT_NAME and RELEASE_BOT_EMAIL variables."
+            exit 1
+          fi
+
+      # The bot token, not GITHUB_TOKEN, pushes the branch, so the pull request runs Verify.
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_BOT_TOKEN }}
+
+      - name: Resolve and apply release version
+        id: version
+        shell: bash
+        env:
+          RELEASE_TYPE: ${{ inputs.release_type }}
+        run: ci/release/prepare-version
+
+      - name: Validate release changes
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: ci/release/validate-changes
+
+      - name: Create or update release pull request
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
+          RELEASE_BOT_NAME: ${{ vars.RELEASE_BOT_NAME }}
+          RELEASE_BOT_EMAIL: ${{ vars.RELEASE_BOT_EMAIL }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_BRANCH: ${{ steps.version.outputs.branch }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: ci/release/create-pull-request

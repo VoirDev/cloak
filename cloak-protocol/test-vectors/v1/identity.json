@@ -1,0 +1,488 @@
+{
+  "protocolVersion": 1,
+  "cryptoSuite": 1,
+  "generator": "cloak-protocol/tools/generate-vectors.mjs",
+  "description": "Identity keys and key statements (PROTOCOL.md §5.1, §5.2). Version 1 is signed by its signing key; version n + 1 also by the recovery signing key of version n. `userIds` derives each Cloak user id from a host user id (§5.0): UUIDv5 under `userNamespace`, over the host id's UTF-8 bytes.",
+  "identities": [
+    {
+      "name": "owner-v1",
+      "userId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e",
+      "keyVersion": 1,
+      "encryptionPrivateKey": "2657da9fb5672e9244a29e72bed73fca0a3c1ac16dba4f4f84420085ed5a3af5",
+      "encryptionPublicKey": "e676f99b4df540daf02f5a7c1c0eeed65a44f3236ffed351a56153d8b7e9882b",
+      "signingSeed": "c50b6e2df87d1cbadb324e30d0aae65ae8ac3d053c8ecc46eaf3ce4fa85cf127",
+      "signingPublicKey": "fa82d22e9f45359db0fad7909573a83f3df285260ccbfe00ad0ca1b14b17d1da",
+      "recoveryKey": "3ae84a10ad1b5e1746c22a7a1f4d2b543da4da1f01461b7214edcc8307056cc8",
+      "recoverySigningSeed": "bf78c5da538f3793385d5a042dcbca5f53363f2e6e2d0e9f24016ace5da921f6",
+      "recoverySigningPublicKey": "036fbb718073311dab9676de7a26de40c9a1beb67e8aa50fcb9b219eb3bb89d0",
+      "keysDigest": "8531bd1439be6b680f509e26088cb811762da4845d26a0e7654e9b54a49a0850"
+    },
+    {
+      "name": "owner-v2",
+      "userId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e",
+      "keyVersion": 2,
+      "encryptionPrivateKey": "9dc0ec28c4145e96356101efd67dd996f8a7dc50377e32efc0852cc30d61c40c",
+      "encryptionPublicKey": "45132d817b5015b28d3af60d767c6a89a438888f42341fff0a664602e6ad453c",
+      "signingSeed": "743901f1bd431544c7596afad4bd52bbc622f9a62806e7ad541117d8be066800",
+      "signingPublicKey": "49d81119f18a9f4de7d05c55aa7ef11b10a4c1c087ea5b212968a5b1d9e7766c",
+      "recoveryKey": "feec0fc8d25565cb093ffa7cd9448127462292e27df78809572d5e481f12a961",
+      "recoverySigningSeed": "ca846f16f86ac96277a040f0b6bfb9c08374171fbff37f3d86b9bf56106d0675",
+      "recoverySigningPublicKey": "9c61322b8cb52d3656b188fd2d679f82856f7c8d1657fa3197bc759fea8521d0",
+      "keysDigest": "24f27d24d80a37e2aee729da278e3240f04a6bf2cd5a36820ce31dd154f9d982"
+    },
+    {
+      "name": "bob-v1",
+      "userId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d1f",
+      "keyVersion": 1,
+      "encryptionPrivateKey": "b2cd0737f57742b9a7db7b29c75b3897ff2c57062efe6862dbefd29d5e9cf4a6",
+      "encryptionPublicKey": "404ae889e43f0c1e66a96ca8b90a9e1b4ccc91ab4c0c2707a7b4f84e27298843",
+      "signingSeed": "1cfb732aca1da0c39f0c057c63a32bbde0a2090a55b91d500056d82991a77c47",
+      "signingPublicKey": "2dcfe4a58e2583c7613e20bfa11d3d970363427ad0dc1c9dd7b1d477fbae7ffe",
+      "recoveryKey": "bdac5cfcbdcee42a9dee9b0fd6cbf59b22bdfec7b793950a37fb500d6345108a",
+      "recoverySigningSeed": "00ab5db0fa1964290aaf64d286e4a7772bf3cb62ddcec37ed74ed978d218d83d",
+      "recoverySigningPublicKey": "8a826be73a17c166108d0ed96a4f32592d54f1cdc38ce7ea1dccfed9b12f839f",
+      "keysDigest": "079c1ccaea95b270cc5b7628800434cc9dbdee6a6f35f1ba5f9086c1c532f3ce"
+    },
+    {
+      "name": "carol-v1",
+      "userId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d2a",
+      "keyVersion": 1,
+      "encryptionPrivateKey": "dc9d572da9d4a0577522452e639d0b185c0a1cfb2f66dc58fdac17943d4312fc",
+      "encryptionPublicKey": "3547fb8160b0c14b9875084fa0afd083b4ee5380dbf639dac9ece834e0ca9a4e",
+      "signingSeed": "7ce84f046b8dc5be03c25c7cf069c387e8e16ade0b2294cfcaa7fccdf7e6987c",
+      "signingPublicKey": "92df670cc564c69e6657424f542f746e98c4da08dbc153a053814667983e92a3",
+      "recoveryKey": "a09880bcf505031ad69bd4fd7e4b98b00914220a6c29c1dfeb5fd0d0cbb3fa68",
+      "recoverySigningSeed": "510a00be708bb73ade1b63fe9bb129c4d0ca3b1bf8c4b86dad8deb3d22541473",
+      "recoverySigningPublicKey": "f28bbe234acc0d7ec1a59e9d7ab2814fb0d7c55712d0ba820fede8381a1151bb",
+      "keysDigest": "e06251318400f3504a65506235a5c0be2fc0b989c8ba431a08a9cb7ae36b733a"
+    },
+    {
+      "name": "dave-v1",
+      "userId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d3b",
+      "keyVersion": 1,
+      "encryptionPrivateKey": "53a4a6fc6916b17a5a8b6c064015722a2d0f5222043f60c2bd254eda98cdcf0a",
+      "encryptionPublicKey": "5460e2617c2036b9eb86f3e9bc299416274ec5c380ccae41447859f438db822f",
+      "signingSeed": "9747a2b66cacd9d05c28923c6a9b6c2ec41633768cdcdae5ba909a79e51539e7",
+      "signingPublicKey": "3f55a979359dc4aa5f077f4a1e52177b61c76e87a7043af0260158d6a9600a78",
+      "recoveryKey": "20811e6ec5301de933aeb50bc5ca1cc5ac869320424a38cf36e861707b1064e6",
+      "recoverySigningSeed": "71e243a8c3feda1b08917177a188c0f34b0872f6eb00dd51a39c59a3a4d8b7a5",
+      "recoverySigningPublicKey": "213c75376ab72e1d5a9dcb86384ea148182807ed3821cba714105dcd696cebc3",
+      "keysDigest": "1ea41805a73e51a30e1eba11e2347da707ecf5b3ae9b67d38932aa93154f4444"
+    }
+  ],
+  "statements": [
+    {
+      "userId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e",
+      "keyVersion": 1,
+      "keysDigest": "8531bd1439be6b680f509e26088cb811762da4845d26a0e7654e9b54a49a0850",
+      "previousKeysDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+      "fields": [
+        {
+          "type": "label",
+          "value": "cloak/v1/key-statement"
+        },
+        {
+          "type": "uuid",
+          "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e"
+        },
+        {
+          "type": "u32",
+          "value": 1
+        },
+        {
+          "type": "digest32",
+          "value": "8531bd1439be6b680f509e26088cb811762da4845d26a0e7654e9b54a49a0850"
+        },
+        {
+          "type": "digest32",
+          "value": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "message": "0016636c6f616b2f76312f6b65792d73746174656d656e740192f5a47c3e7b1a9d2e5f6a7b8c9d0e000000018531bd1439be6b680f509e26088cb811762da4845d26a0e7654e9b54a49a08500000000000000000000000000000000000000000000000000000000000000000",
+      "signature": "01d5661cac358d8990c26960fc1a6666329e625f2a517cd8ba24efda29c104bbc002172fd4ce0eb67b94dfff07da8462926210b16600f04305fec2eb83569d3e0c"
+    },
+    {
+      "userId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e",
+      "keyVersion": 2,
+      "keysDigest": "24f27d24d80a37e2aee729da278e3240f04a6bf2cd5a36820ce31dd154f9d982",
+      "previousKeysDigest": "8531bd1439be6b680f509e26088cb811762da4845d26a0e7654e9b54a49a0850",
+      "fields": [
+        {
+          "type": "label",
+          "value": "cloak/v1/key-statement"
+        },
+        {
+          "type": "uuid",
+          "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e"
+        },
+        {
+          "type": "u32",
+          "value": 2
+        },
+        {
+          "type": "digest32",
+          "value": "24f27d24d80a37e2aee729da278e3240f04a6bf2cd5a36820ce31dd154f9d982"
+        },
+        {
+          "type": "digest32",
+          "value": "8531bd1439be6b680f509e26088cb811762da4845d26a0e7654e9b54a49a0850"
+        }
+      ],
+      "message": "0016636c6f616b2f76312f6b65792d73746174656d656e740192f5a47c3e7b1a9d2e5f6a7b8c9d0e0000000224f27d24d80a37e2aee729da278e3240f04a6bf2cd5a36820ce31dd154f9d9828531bd1439be6b680f509e26088cb811762da4845d26a0e7654e9b54a49a0850",
+      "signature": "014cb4758f11705ea40a769fef969d2ca9003bbced4f567361df4e655d215620a69f1dee654cf965fe36c966a3cfbfcecc6f40bf12ed6b99a8f9e3130a71615f03",
+      "recoverySignature": "01cc4c5ed20fc62a547a095b873f3665fabbfc9db98d7be1a56489cedad0f4b965a3ed6fa9b82db946d4de6d36a0a95aa9c014b10e7a8c6de963208a6c5df05a0c"
+    },
+    {
+      "userId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d1f",
+      "keyVersion": 1,
+      "keysDigest": "079c1ccaea95b270cc5b7628800434cc9dbdee6a6f35f1ba5f9086c1c532f3ce",
+      "previousKeysDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+      "fields": [
+        {
+          "type": "label",
+          "value": "cloak/v1/key-statement"
+        },
+        {
+          "type": "uuid",
+          "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d1f"
+        },
+        {
+          "type": "u32",
+          "value": 1
+        },
+        {
+          "type": "digest32",
+          "value": "079c1ccaea95b270cc5b7628800434cc9dbdee6a6f35f1ba5f9086c1c532f3ce"
+        },
+        {
+          "type": "digest32",
+          "value": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "message": "0016636c6f616b2f76312f6b65792d73746174656d656e740192f5a47c3e7b1a9d2e5f6a7b8c9d1f00000001079c1ccaea95b270cc5b7628800434cc9dbdee6a6f35f1ba5f9086c1c532f3ce0000000000000000000000000000000000000000000000000000000000000000",
+      "signature": "015370084df68babe096393d45a782cc8d3592ce869d854bb692bba46748c72dac4847ba93ebb6a3959509f23e0b312c6a0ca403e5e859d49c337657cfa8ec1d06"
+    },
+    {
+      "userId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d2a",
+      "keyVersion": 1,
+      "keysDigest": "e06251318400f3504a65506235a5c0be2fc0b989c8ba431a08a9cb7ae36b733a",
+      "previousKeysDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+      "fields": [
+        {
+          "type": "label",
+          "value": "cloak/v1/key-statement"
+        },
+        {
+          "type": "uuid",
+          "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d2a"
+        },
+        {
+          "type": "u32",
+          "value": 1
+        },
+        {
+          "type": "digest32",
+          "value": "e06251318400f3504a65506235a5c0be2fc0b989c8ba431a08a9cb7ae36b733a"
+        },
+        {
+          "type": "digest32",
+          "value": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "message": "0016636c6f616b2f76312f6b65792d73746174656d656e740192f5a47c3e7b1a9d2e5f6a7b8c9d2a00000001e06251318400f3504a65506235a5c0be2fc0b989c8ba431a08a9cb7ae36b733a0000000000000000000000000000000000000000000000000000000000000000",
+      "signature": "01c7d351f49dbd035f294d14b9a8676bc450ef44d9dcbc0f0cf11e8e9f58ecec3db2bf0711a5af1a0b6e913d30614566124b42bd230f3ece465bbadfd9ff28060d"
+    },
+    {
+      "userId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d3b",
+      "keyVersion": 1,
+      "keysDigest": "1ea41805a73e51a30e1eba11e2347da707ecf5b3ae9b67d38932aa93154f4444",
+      "previousKeysDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+      "fields": [
+        {
+          "type": "label",
+          "value": "cloak/v1/key-statement"
+        },
+        {
+          "type": "uuid",
+          "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d3b"
+        },
+        {
+          "type": "u32",
+          "value": 1
+        },
+        {
+          "type": "digest32",
+          "value": "1ea41805a73e51a30e1eba11e2347da707ecf5b3ae9b67d38932aa93154f4444"
+        },
+        {
+          "type": "digest32",
+          "value": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "message": "0016636c6f616b2f76312f6b65792d73746174656d656e740192f5a47c3e7b1a9d2e5f6a7b8c9d3b000000011ea41805a73e51a30e1eba11e2347da707ecf5b3ae9b67d38932aa93154f44440000000000000000000000000000000000000000000000000000000000000000",
+      "signature": "01dbb74c5e9e9b0b4eda4b8a945a04bae0f206781d47680f202e0e3a14609cdacd78693208a5567e9c0c08f03675766ba5d928a0fd1d5d85649ade4d2ac2a87c08"
+    }
+  ],
+  "negatives": [
+    {
+      "name": "recovery-signature-by-new-recovery-key",
+      "statement": {
+        "userId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e",
+        "keyVersion": 2,
+        "keysDigest": "24f27d24d80a37e2aee729da278e3240f04a6bf2cd5a36820ce31dd154f9d982",
+        "previousKeysDigest": "8531bd1439be6b680f509e26088cb811762da4845d26a0e7654e9b54a49a0850",
+        "fields": [
+          {
+            "type": "label",
+            "value": "cloak/v1/key-statement"
+          },
+          {
+            "type": "uuid",
+            "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e"
+          },
+          {
+            "type": "u32",
+            "value": 2
+          },
+          {
+            "type": "digest32",
+            "value": "24f27d24d80a37e2aee729da278e3240f04a6bf2cd5a36820ce31dd154f9d982"
+          },
+          {
+            "type": "digest32",
+            "value": "8531bd1439be6b680f509e26088cb811762da4845d26a0e7654e9b54a49a0850"
+          }
+        ],
+        "message": "0016636c6f616b2f76312f6b65792d73746174656d656e740192f5a47c3e7b1a9d2e5f6a7b8c9d0e0000000224f27d24d80a37e2aee729da278e3240f04a6bf2cd5a36820ce31dd154f9d9828531bd1439be6b680f509e26088cb811762da4845d26a0e7654e9b54a49a0850",
+        "signature": "014cb4758f11705ea40a769fef969d2ca9003bbced4f567361df4e655d215620a69f1dee654cf965fe36c966a3cfbfcecc6f40bf12ed6b99a8f9e3130a71615f03",
+        "recoverySignature": "01684e56fda055c924bfaa6019c8d56bac6c0cd896f81bf3dcea0f4d7df8ac47ec9adfdf4f865d536bd9c0a72e520e08ce5c362fa0ca1798095b7c00bbe51f8b05"
+      },
+      "reason": "bad_statement"
+    },
+    {
+      "name": "recovery-signature-by-old-signing-key",
+      "statement": {
+        "userId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e",
+        "keyVersion": 2,
+        "keysDigest": "24f27d24d80a37e2aee729da278e3240f04a6bf2cd5a36820ce31dd154f9d982",
+        "previousKeysDigest": "8531bd1439be6b680f509e26088cb811762da4845d26a0e7654e9b54a49a0850",
+        "fields": [
+          {
+            "type": "label",
+            "value": "cloak/v1/key-statement"
+          },
+          {
+            "type": "uuid",
+            "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e"
+          },
+          {
+            "type": "u32",
+            "value": 2
+          },
+          {
+            "type": "digest32",
+            "value": "24f27d24d80a37e2aee729da278e3240f04a6bf2cd5a36820ce31dd154f9d982"
+          },
+          {
+            "type": "digest32",
+            "value": "8531bd1439be6b680f509e26088cb811762da4845d26a0e7654e9b54a49a0850"
+          }
+        ],
+        "message": "0016636c6f616b2f76312f6b65792d73746174656d656e740192f5a47c3e7b1a9d2e5f6a7b8c9d0e0000000224f27d24d80a37e2aee729da278e3240f04a6bf2cd5a36820ce31dd154f9d9828531bd1439be6b680f509e26088cb811762da4845d26a0e7654e9b54a49a0850",
+        "signature": "014cb4758f11705ea40a769fef969d2ca9003bbced4f567361df4e655d215620a69f1dee654cf965fe36c966a3cfbfcecc6f40bf12ed6b99a8f9e3130a71615f03",
+        "recoverySignature": "0145b795494924ab098a8e3158f564359bc575625509a8777395868a90f152841b07b77577d909a8ec9b2c9f8c9c461df6a81ef8e6b98229879b5e99b80addbd00"
+      },
+      "reason": "bad_statement"
+    },
+    {
+      "name": "no-recovery-signature",
+      "statement": {
+        "userId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e",
+        "keyVersion": 2,
+        "keysDigest": "24f27d24d80a37e2aee729da278e3240f04a6bf2cd5a36820ce31dd154f9d982",
+        "previousKeysDigest": "8531bd1439be6b680f509e26088cb811762da4845d26a0e7654e9b54a49a0850",
+        "fields": [
+          {
+            "type": "label",
+            "value": "cloak/v1/key-statement"
+          },
+          {
+            "type": "uuid",
+            "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e"
+          },
+          {
+            "type": "u32",
+            "value": 2
+          },
+          {
+            "type": "digest32",
+            "value": "24f27d24d80a37e2aee729da278e3240f04a6bf2cd5a36820ce31dd154f9d982"
+          },
+          {
+            "type": "digest32",
+            "value": "8531bd1439be6b680f509e26088cb811762da4845d26a0e7654e9b54a49a0850"
+          }
+        ],
+        "message": "0016636c6f616b2f76312f6b65792d73746174656d656e740192f5a47c3e7b1a9d2e5f6a7b8c9d0e0000000224f27d24d80a37e2aee729da278e3240f04a6bf2cd5a36820ce31dd154f9d9828531bd1439be6b680f509e26088cb811762da4845d26a0e7654e9b54a49a0850",
+        "signature": "014cb4758f11705ea40a769fef969d2ca9003bbced4f567361df4e655d215620a69f1dee654cf965fe36c966a3cfbfcecc6f40bf12ed6b99a8f9e3130a71615f03"
+      },
+      "reason": "bad_statement"
+    }
+  ],
+  "userNamespace": "715ec4b7-23ef-5724-a2a7-6bd5871ab13d",
+  "userIds": [
+    {
+      "hostUserId": "alice",
+      "userId": "36231350-c1f4-5eaf-ad19-97af31f3a03d"
+    },
+    {
+      "hostUserId": "user@example.com",
+      "userId": "b7d70fa5-6230-55e6-8fc7-ccde3204c00d"
+    },
+    {
+      "hostUserId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e",
+      "userId": "6e9c970f-6abf-5be2-8928-6782da5bb34c"
+    },
+    {
+      "hostUserId": "0192F5A4-7C3E-7B1A-9D2E-5F6A7B8C9D0E",
+      "userId": "3b5a4142-4cf7-5fbf-882f-0a3f8ddad754"
+    },
+    {
+      "hostUserId": "auth0|64b7f1c2e4",
+      "userId": "cd85e682-c849-5f1b-812f-01bf96b0f91e"
+    },
+    {
+      "hostUserId": " padded ",
+      "userId": "a2c053d9-ab03-5242-96a0-65e361cd2d63"
+    },
+    {
+      "hostUserId": "Ünïcødé 用户",
+      "userId": "d67c2b99-5278-53e8-a2fd-369ca3539baa"
+    },
+    {
+      "hostUserId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "userId": "c51221dc-33d6-5dd1-a23e-550027823fa7"
+    }
+  ],
+  "nodeIds": [
+    {
+      "ownerUserId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e",
+      "homeVaultId": "0192f5a3-0000-7aaa-8bbb-0123456789ab",
+      "nodeKey": "server-1",
+      "name": "000d636c6f616b2f76312f6e6f64650192f5a300007aaa8bbb0123456789ab00087365727665722d31",
+      "nodeId": "afdd515a-cdcf-5c88-8cb2-66e7b6db2dd9"
+    },
+    {
+      "ownerUserId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e",
+      "homeVaultId": "0192f5a3-0000-7aaa-8bbb-0123456789cd",
+      "nodeKey": "server-2",
+      "name": "000d636c6f616b2f76312f6e6f64650192f5a300007aaa8bbb0123456789cd00087365727665722d32",
+      "nodeId": "6323d1e5-5f64-5c89-a9e5-ec6b8f40643f"
+    },
+    {
+      "ownerUserId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d1f",
+      "homeVaultId": "0192f5a3-0000-7aaa-8bbb-0123456789ab",
+      "nodeKey": "server-1",
+      "name": "000d636c6f616b2f76312f6e6f64650192f5a300007aaa8bbb0123456789ab00087365727665722d31",
+      "nodeId": "f5703df4-aaff-5a2c-bbfc-7a696fe8f327"
+    },
+    {
+      "ownerUserId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e",
+      "homeVaultId": "0192f5a3-0000-7aaa-8bbb-0123456789ab",
+      "nodeKey": "Ünïcødé ресурс",
+      "name": "000d636c6f616b2f76312f6e6f64650192f5a300007aaa8bbb0123456789ab0018c39c6ec3af63c3b864c3a920d180d0b5d181d183d180d181",
+      "nodeId": "cf870a43-990d-5981-b67a-746885ad92de"
+    },
+    {
+      "ownerUserId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e",
+      "homeVaultId": "0192f5a3-0000-7aaa-8bbb-0123456789ab",
+      "nodeKey": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+      "name": "000d636c6f616b2f76312f6e6f64650192f5a300007aaa8bbb0123456789ab00ff6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
+      "nodeId": "06878689-58b8-5159-be59-1f72614d8314"
+    }
+  ],
+  "credentials": {
+    "signer": {
+      "userId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e",
+      "keyVersion": 2
+    },
+    "change": {
+      "privateKeyBundle": "5204a24b16c8abb026951c75bdb561adae3b15f590f2f086e4fff98e71d9c5825d6b14a7ca513250e707b6063d2599fb811059ddf7d083fc4196442f328e1b6e5c203a8df65e172570cc9ed6000c829734bb113273a1f18beeebfe1b1e838bdb68a9e4ab08c7ca41e2c029e8a0b230ba9545de69894c0d4614b34b0d947cbde49848d40c0fe2e196d6cf30e698badbb3d7",
+      "kdf": {
+        "salt": "4caed4b00d3b74c1b1cfb71c5f33107a",
+        "memoryKib": 65536,
+        "iterations": 3,
+        "parallelism": 1
+      },
+      "credentialsVersion": 3,
+      "fields": [
+        {
+          "type": "label",
+          "value": "cloak/v1/credentials"
+        },
+        {
+          "type": "uuid",
+          "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e"
+        },
+        {
+          "type": "u32",
+          "value": 2
+        },
+        {
+          "type": "u32",
+          "value": 3
+        },
+        {
+          "type": "digest32",
+          "value": "b8f4b316c4de7ee50dcd483752ed566f42fead0194589c59f82c9c7d724ad574"
+        },
+        {
+          "type": "digest32",
+          "value": "63a5a98b0df5b6b21f4a66c1f4c55fde8bb480930c2266dfa6a4c13067850463"
+        },
+        {
+          "type": "u32",
+          "value": 65536
+        },
+        {
+          "type": "u32",
+          "value": 3
+        },
+        {
+          "type": "u8",
+          "value": 1
+        }
+      ],
+      "message": "0014636c6f616b2f76312f63726564656e7469616c730192f5a47c3e7b1a9d2e5f6a7b8c9d0e0000000200000003b8f4b316c4de7ee50dcd483752ed566f42fead0194589c59f82c9c7d724ad57463a5a98b0df5b6b21f4a66c1f4c55fde8bb480930c2266dfa6a4c13067850463000100000000000301",
+      "signature": "012c06e37ddc4fc5cf3b6a8c8d11efad674155d30736f9e1f02f52b82c7f9966a90baa935714d897dc79be2b68316ff5158fccd46cdab07c9d9c2f4c0d17865a08"
+    },
+    "deletion": {
+      "credentialsVersion": 3,
+      "notAfter": 1793000000,
+      "fields": [
+        {
+          "type": "label",
+          "value": "cloak/v1/identity-deletion"
+        },
+        {
+          "type": "uuid",
+          "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e"
+        },
+        {
+          "type": "u32",
+          "value": 2
+        },
+        {
+          "type": "u32",
+          "value": 3
+        },
+        {
+          "type": "u64",
+          "value": "1793000000"
+        }
+      ],
+      "message": "001a636c6f616b2f76312f6964656e746974792d64656c6574696f6e0192f5a47c3e7b1a9d2e5f6a7b8c9d0e0000000200000003000000006adf0240",
+      "signature": "019554f4c4bc4ce77efd1fd60fb49276cb2e1bea9307a81728d18431262c39dfab1b86394918098e579aee1db2499f3f8bcdc37f7fa26179be29e5ef9f4d348107"
+    }
+  }
+}

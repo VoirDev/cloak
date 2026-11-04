@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Publish Release: once every artifact is published, creates the tag vX.Y.Z on the merged commit and
+# the GitHub Release, which lists the published coordinates and the release's CHANGELOG.md section.
+# The tag and the Release mark a complete release, so they come last; an existing tag must already
+# point at the merged commit.
+#
+# Environment:
+#   RELEASE_TAG                    vX.Y.Z
+#   GITHUB_SHA, GITHUB_REPOSITORY  the merged commit and this repository
+#   GH_TOKEN                       a token that may write contents
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+source ci/release/common.sh
+
+: "${RELEASE_TAG:?}" "${GH_TOKEN:?}" "${GITHUB_SHA:?}" "${GITHUB_REPOSITORY:?}"
+version="${RELEASE_TAG#v}"
+require_semver "$version"
+[ "$(read_version)" = "$version" ] || fail "$VERSION_FILE does not hold $version."
+
+echo "==> Tag $RELEASE_TAG"
+if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null; then
+  git fetch --no-tags origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+  [ "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$GITHUB_SHA" ] ||
+    fail "Tag $RELEASE_TAG exists on another commit; it is never moved."
+  echo "Tag $RELEASE_TAG exists on $GITHUB_SHA."
+else
+  gh api "repos/$GITHUB_REPOSITORY/git/refs" --method POST \
+    --field "ref=refs/tags/$RELEASE_TAG" --field "sha=$GITHUB_SHA" >/dev/null
+  echo "Created tag $RELEASE_TAG on $GITHUB_SHA."
+fi
+
+echo "==> GitHub Release $RELEASE_TAG"
+if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+  echo "GitHub Release $RELEASE_TAG exists."
+  exit 0
+fi
+# The newest version is the latest Release; a patch of an older line is not.
+git fetch --quiet --tags origin
+newest="$( (git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true; echo "$RELEASE_TAG") | sort -V | tail -n 1)"
+latest=false
+[ "$newest" = "$RELEASE_TAG" ] && latest=true
+
+notes="$(mktemp)"
+trap 'rm -f "$notes"' EXIT
+{
+  # The release's own section of CHANGELOG.md, from its heading to the next one.
+  awk -v heading="## $version" '
+    index($0, heading) == 1 { printing = 1; next }
+    printing && /^## / { exit }
+    printing { print }
+  ' CHANGELOG.md
+  echo
+  echo "## Published artifacts"
+  echo
+  echo "From GitHub Packages of \`$GITHUB_REPOSITORY\`, which asks for a token that may read packages."
+  echo
+  echo "| Artifact | Coordinates |"
+  echo "| --- | --- |"
+  echo "| Server core (any JVM host) | \`$MAVEN_GROUP:cloak-server-core:$version\` |"
+  echo "| Spring Boot starter | \`$MAVEN_GROUP:cloak-spring-boot-starter:$version\` |"
+  echo "| API models, which the starter brings in | \`$MAVEN_GROUP:cloak-api-models:$version\` |"
+  for entry in "${NPM_PACKAGES[@]}"; do
+    read -r name _ _ <<<"$entry"
+    echo "| npm package | \`$name@$version\` (from \`$NPM_REGISTRY\`) |"
+  done
+  echo
+} >"$notes"
+gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+  --title "$RELEASE_TAG" --notes-file "$notes" --generate-notes --latest="$latest"
+echo "Created GitHub Release $RELEASE_TAG."

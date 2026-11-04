@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Publish Release: decides whether the pushed commit publishes a release. It does when it changed
+# VERSION, is the merge of release/vX.Y.Z for exactly that version, holds the tree that release PR
+# verified, and the release is not complete yet. Finds the Verify run that kept the artifacts.
+#
+# Environment:
+#   GITHUB_SHA, GITHUB_REPOSITORY  the pushed commit and this repository
+#   GH_TOKEN                       a token that may read pull requests and workflow runs
+#   GITHUB_OUTPUT                  receives version, tag, should_publish and verify_run_id
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+source ci/release/common.sh
+
+: "${GITHUB_SHA:?}" "${GITHUB_REPOSITORY:?}" "${GITHUB_OUTPUT:?}" "${GH_TOKEN:?}"
+echo "==> Resolve the release"
+version="$(read_version)"
+tag="v$version"
+branch="release/$tag"
+echo "version=$version" >>"$GITHUB_OUTPUT"
+echo "tag=$tag" >>"$GITHUB_OUTPUT"
+
+previous="$(git show "$GITHUB_SHA^1:$VERSION_FILE" | tr -d '[:space:]')"
+if [ "$previous" = "$version" ]; then
+  echo "The version stays $version; nothing to publish."
+  echo "should_publish=false" >>"$GITHUB_OUTPUT"
+  exit 0
+fi
+
+# The merged release PR of exactly this version, from this repository.
+pull="$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" --jq "
+  [.[] | select(.merged_at != null and .head.ref == \"$branch\"
+    and .head.repo.full_name == \"$GITHUB_REPOSITORY\")] | first | select(. != null)
+  | \"\(.number) \(.head.sha)\"")"
+[ -n "$pull" ] || fail "$GITHUB_SHA changes the version to $version but is not the merge of $branch."
+read -r number head_sha <<<"$pull"
+echo "Release PR #$number, head $head_sha."
+
+# Complete only with both the tag and the GitHub Release; otherwise finish it.
+if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null &&
+  gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+  echo "$tag and its GitHub Release exist; the release is complete."
+  echo "should_publish=false" >>"$GITHUB_OUTPUT"
+  exit 0
+fi
+
+# The merged commit must hold exactly the files the release PR verified and built, which main's
+# protection (checks required on an up-to-date branch) guarantees and this confirms.
+git fetch --no-tags origin "refs/pull/$number/head"
+if [ "$(git rev-parse "$head_sha^{tree}")" != "$(git rev-parse "$GITHUB_SHA^{tree}")" ]; then
+  fail "The merged tree differs from the verified $head_sha; re-run the release from a new PR."
+fi
+
+echo "==> Find the kept release artifacts"
+# The newest successful Verify run of that commit, which must still hold the release artifact.
+run_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/verify.yml/runs?event=pull_request&status=success&head_sha=$head_sha&per_page=100" \
+  --jq "[.workflow_runs[] | select(.head_branch == \"$branch\"
+    and .head_repository.full_name == \"$GITHUB_REPOSITORY\")] | max_by(.run_started_at) | .id // empty")"
+if [ -z "$run_id" ] || [ "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100" \
+  --jq "any(.artifacts[]; .name == \"$RELEASE_ARTIFACT\" and (.expired | not))")" != true ]; then
+  fail "No Verify run of $head_sha holds $RELEASE_ARTIFACT; re-run Verify on PR #$number, then this workflow."
+fi
+echo "Verify run $run_id holds $RELEASE_ARTIFACT."
+echo "should_publish=true" >>"$GITHUB_OUTPUT"
+echo "verify_run_id=$run_id" >>"$GITHUB_OUTPUT"

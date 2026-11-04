@@ -1,0 +1,31 @@
+packages:
+  - packages/*
+
+# Runtime dependencies of the published packages are caret ranges, so an application shares one
+# copy with its own; the lockfile pins what this repository builds and tests with.
+catalog:
+  '@eslint/js': 10.0.1
+  '@hpke/chacha20poly1305': ^1.8.0
+  '@hpke/core': ^1.10.0
+  '@hpke/dhkem-x25519': ^1.8.0
+  '@noble/ciphers': ^2.4.0
+  '@noble/curves': ^2.4.0
+  '@noble/hashes': ^2.4.0
+  '@types/node': 26.6.6
+  eslint: 10.14.0
+  eslint-config-prettier: 10.1.8
+  fake-indexeddb: 6.2.7
+  hash-wasm: ^4.12.0
+  openapi-fetch: ^0.17.0
+  openapi-typescript: 7.13.0
+  prettier: 3.9.10
+  typescript: 6.0.3
+  typescript-eslint: 8.72.1
+  vitest: 5.1.0
+  zod: ^4.6.7
+
+# openapi-typescript 7 declares a TypeScript 5 peer but generates correctly with TypeScript 6; the
+# generated file is checked against the spec on every typecheck (generate:check).
+peerDependencyRules:
+  allowedVersions:
+    openapi-typescript>typescript: '6'

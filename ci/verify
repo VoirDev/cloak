@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Decides whether the repository is safe to merge: the one command Verify runs, and the same one a
+# developer runs before pushing (docs/development.md#checks):
+#
+#   1. the protocol's test vectors match their reference generator;
+#   2. the Kotlin build passes with every test (PostgreSQL in Testcontainers);
+#   3. the TypeScript workspace passes its checks (format, lint, types, tests, build);
+#   4. the TypeScript client passes its end-to-end suites against the Kotlin server; and
+#   5. every package still publishes: the Maven artifacts stage at the current VERSION and the npm
+#      packages pack and install into a consumer, so a release pull request does not find out first.
+#
+# Needs Docker, a JDK that Gradle runs on (JAVA_HOME), Node.js 24 or later, pnpm and jq.
+#
+# Environment:
+#   GRADLE_ARGS  extra arguments to Gradle, such as --no-daemon (default none)
+set -euo pipefail
+cd "$(dirname "$0")/.."
+read -r -a gradle_args <<<"${GRADLE_ARGS:-}"
+gradle() { ./gradlew "$@" ${gradle_args[@]+"${gradle_args[@]}"}; }
+
+echo "==> Protocol test vectors match the reference generator"
+scratch="$(mktemp -d)"
+trap 'rm -rf "$scratch"' EXIT
+node cloak-protocol/tools/generate-vectors.mjs "$scratch/vectors" >/dev/null
+diff -r "$scratch/vectors" cloak-protocol/test-vectors/v1
+
+echo "==> Kotlin build and tests"
+gradle build
+
+echo "==> TypeScript install"
+(cd cloak-ts && pnpm install --frozen-lockfile)
+
+echo "==> TypeScript checks"
+(cd cloak-ts && pnpm check)
+
+echo "==> TypeScript client end-to-end tests against the Kotlin server"
+(cd cloak-ts && pnpm test:e2e)
+
+echo "==> Packages still publish"
+version="$(tr -d '[:space:]' <VERSION)"
+gradle publishAllPublicationsToReleaseRepository -PreleaseVersion="$version"
+ci/release/pack-npm "$scratch/npm" "$version"
+
+echo "==> Verified"

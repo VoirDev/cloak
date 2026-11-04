@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Prepare Release: checks the prepared files before they are committed. VERSION must name the
+# release version, and nothing else may change.
+#
+# Environment:
+#   RELEASE_VERSION  the resolved version, MAJOR.MINOR.PATCH
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+source ci/release/common.sh
+
+echo "==> Check the prepared files"
+require_semver "${RELEASE_VERSION:-}"
+[ "$(read_version)" = "$RELEASE_VERSION" ] || fail "$VERSION_FILE does not hold $RELEASE_VERSION."
+
+while IFS= read -r changed; do
+  [ -z "$changed" ] && continue
+  [ "$changed" = "$VERSION_FILE" ] || fail "Unexpected change to $changed."
+done < <(git diff --name-only)
+
+git diff --check
+git diff --stat

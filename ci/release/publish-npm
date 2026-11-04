@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Publishes the npm tarballs the release pull request's Verify run packed, unchanged, to GitHub
+# Packages' npm registry, in dependency order. A version already published counts only when the
+# registry holds exactly the kept tarball, so a rerun completes a release and never accepts
+# different content.
+#
+#   ci/release/publish-npm [--dry-run] <kept-directory> <version>
+#
+# Reads NODE_AUTH_TOKEN, a token that may write packages (not needed with --dry-run, which only
+# checks the kept tarballs). GitHub Packages has no npm provenance, so none is attached.
+set -euo pipefail
+source "$(dirname "$0")/common.sh"
+
+dry_run=false
+if [ "${1:-}" = "--dry-run" ]; then
+  dry_run=true
+  shift
+fi
+if [ "$#" -ne 2 ]; then
+  echo "Usage: $0 [--dry-run] <kept-directory> <version>" >&2
+  exit 2
+fi
+version="$2"
+require_semver "$version"
+cd "$1"
+
+echo "==> Check the kept tarballs"
+[ -s SHA256SUMS ] || fail "$1 has no SHA256SUMS manifest."
+expected=""
+for entry in "${NPM_PACKAGES[@]}"; do
+  read -r _ _ prefix <<<"$entry"
+  expected+="$prefix-$version.tgz"$'\n'
+done
+[ "$(cut -c67- SHA256SUMS | LC_ALL=C sort)" = "$(printf '%s' "$expected" | LC_ALL=C sort)" ] ||
+  fail "SHA256SUMS does not list exactly the release's tarballs."
+shasum -a 256 --check --quiet SHA256SUMS
+
+if [ "$dry_run" = false ]; then
+  : "${NODE_AUTH_TOKEN:?NODE_AUTH_TOKEN is required.}"
+fi
+config="$(mktemp)"
+trap 'rm -f "$config"' EXIT
+# The token reaches npm through a private config file that names it by variable, never its command line.
+(umask 077 && printf '//%s/:_authToken=${NODE_AUTH_TOKEN}\n' "${NPM_REGISTRY#https://}" >"$config")
+
+for entry in "${NPM_PACKAGES[@]}"; do
+  read -r name _ prefix <<<"$entry"
+  tarball="$prefix-$version.tgz"
+  integrity="sha512-$(openssl dgst -sha512 -binary "$tarball" | base64 | tr -d '\n')"
+  if [ "$dry_run" = true ]; then
+    echo "Dry run: $tarball ($integrity) would be published to $NPM_REGISTRY."
+    continue
+  fi
+  echo "==> Publish $name@$version"
+  published="$(npm view "$name@$version" dist.integrity --registry "$NPM_REGISTRY" --userconfig "$config" 2>/dev/null || true)"
+  if [ -n "$published" ]; then
+    [ "$published" = "$integrity" ] || fail "$name@$version is already published with different content."
+    echo "Already published, identical: $name@$version."
+    continue
+  fi
+  npm publish "$tarball" --registry "$NPM_REGISTRY" --userconfig "$config"
+  echo "Published $name@$version."
+done

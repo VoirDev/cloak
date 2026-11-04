@@ -1,0 +1,48 @@
+{
+  "name": "@voirdev/cloak-crypto",
+  "version": "0.0.0",
+  "description": "Cloak protocol v1 for TypeScript: identity keys, encryption, signatures, vault log and section verification, codes.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/VoirDev/cloak.git",
+    "directory": "cloak-ts/packages/crypto"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@hpke/chacha20poly1305": "catalog:",
+    "@hpke/core": "catalog:",
+    "@hpke/dhkem-x25519": "catalog:",
+    "@noble/ciphers": "catalog:",
+    "@noble/curves": "catalog:",
+    "@noble/hashes": "catalog:",
+    "hash-wasm": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

@@ -1,0 +1,165 @@
+name: Verify
+
+# Pull requests into main run `ci/verify`, the one command that decides whether the repository is safe
+# to merge, and runs the same on a laptop: the protocol's vectors, the Gradle build and tests, the
+# TypeScript checks, the client's end-to-end suites against the Kotlin server, and that every
+# package still publishes. A release pull request (release/vX.Y.Z) then builds the release once,
+# exercises it and keeps it for Publish Release (ci/release/build-artifacts). docs/development.md#releases.
+#
+# `[skip verify]` in the pull-request body skips verification, which GitHub counts as a pass; a release
+# pull request ignores it, because Publish Release does not verify the merged commit again.
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - edited
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Build and check whole repository
+    # A release pull request is always verified; publication relies on it.
+    if: >-
+      startsWith(github.event.pull_request.head.ref, 'release/v') ||
+      !contains(github.event.pull_request.body || '', '[skip verify]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      GRADLE_ARGS: --no-daemon
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Gradle runs on JDK 25 (the last one listed becomes JAVA_HOME) and compiles with the Java 21
+      # toolchain, which it finds through JAVA_HOME_21_X64.
+      - name: Set up JDKs
+        uses: actions/setup-java@v6
+        with:
+          distribution: corretto
+          java-version: |
+            21
+            25
+
+      - name: Point Gradle at the Java 21 toolchain
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.gradle
+          echo 'org.gradle.java.installations.fromEnv=JAVA_HOME_21_X64' >> ~/.gradle/gradle.properties
+
+      # Nothing runs on main to save shared caches, so a pull request saves its own for its later runs.
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          package_json_file: cloak-ts/package.json
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: cloak-ts/.nvmrc
+          cache: pnpm
+          cache-dependency-path: cloak-ts/pnpm-lock.yaml
+
+      # Testcontainers starts PostgreSQL on the runner's Docker.
+      - name: Verify whole repository
+        run: ./ci/verify
+
+      - name: Keep test reports
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports
+          path: '**/build/reports/tests/'
+          retention-days: 7
+
+  release-artifacts:
+    name: Build release artifacts
+    needs: verify
+    # Only this repository's release branches; skipped, and so passing, on every other pull request.
+    if: >-
+      startsWith(github.event.pull_request.head.ref, 'release/v') &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GRADLE_ARGS: --no-daemon
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Gradle runs on JDK 25 (the last one listed becomes JAVA_HOME) and compiles with the Java 21
+      # toolchain, which it finds through JAVA_HOME_21_X64.
+      - name: Set up JDKs
+        uses: actions/setup-java@v6
+        with:
+          distribution: corretto
+          java-version: |
+            21
+            25
+
+      - name: Point Gradle at the Java 21 toolchain
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.gradle
+          echo 'org.gradle.java.installations.fromEnv=JAVA_HOME_21_X64' >> ~/.gradle/gradle.properties
+
+      # Nothing runs on main to save shared caches, so a pull request saves its own for its later runs.
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          package_json_file: cloak-ts/package.json
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: cloak-ts/.nvmrc
+          cache: pnpm
+          cache-dependency-path: cloak-ts/pnpm-lock.yaml
+
+      # Passed through the environment: a branch name is author-controlled text, never script. The
+      # revision is the release branch's commit, whose tree Publish Release confirms is the merged one.
+      - name: Build and exercise release artifacts
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          REVISION: ${{ github.event.pull_request.head.sha }}
+        run: ./ci/release/build-artifacts
+
+      # Publish Release uploads exactly these and deletes them once the release is complete; an expired
+      # artifact is rebuilt by re-running this workflow on the release pull request.
+      - name: Keep release artifacts for publication
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-artifacts
+          path: release-artifacts/
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true
+
+      - name: Keep test reports
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-test-reports
+          path: '**/build/reports/tests/'
+          retention-days: 7

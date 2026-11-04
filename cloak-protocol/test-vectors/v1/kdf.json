@@ -1,0 +1,118 @@
+{
+  "protocolVersion": 1,
+  "cryptoSuite": 1,
+  "generator": "cloak-protocol/tools/generate-vectors.mjs",
+  "description": "Key derivation (PROTOCOL.md §5, §6.1, §15).",
+  "masterKey": {
+    "userId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e",
+    "password": "correct horse battery staple ✓",
+    "passwordNfkcUtf8": "636f727265637420686f727365206261747465727920737461706c6520e29c93",
+    "kdf": {
+      "algorithm": "argon2id",
+      "salt": "822a9c2b58ffd3bbc0ef8e6f5578c552",
+      "memoryKib": 65536,
+      "iterations": 2,
+      "parallelism": 1
+    },
+    "secretKey": "d6d1dd760ef9b165bb76f4a7d08320c1",
+    "passwordKey": "6981a3dec0b64ece124ad5e0e33bac3d5befaa559d73882076e2c45cff34298f",
+    "secretKeyMaterial": "65eb72ca9be0c7a9260f27e324fe70a91c6d085c86427363545310e6d1de028f",
+    "masterKey": "0c6ad1145b5689673445f203c7c5dc944782a2091b31fb4322b1d4ba2eea2b00",
+    "privateKeyBundleKey": "d1d54fad5ef9e7fdf403480f6ef6fe1afe4694e0e127fc85d8622c08661d90e9"
+  },
+  "kdfLimits": {
+    "accept": [
+      {
+        "memoryKib": 65536,
+        "iterations": 2
+      },
+      {
+        "memoryKib": 1048576,
+        "iterations": 10
+      }
+    ],
+    "refuse": [
+      {
+        "memoryKib": 65535,
+        "iterations": 2
+      },
+      {
+        "memoryKib": 65536,
+        "iterations": 1
+      },
+      {
+        "memoryKib": 1048577,
+        "iterations": 2
+      },
+      {
+        "memoryKib": 65536,
+        "iterations": 11
+      }
+    ]
+  },
+  "recoveryKeys": [
+    {
+      "userId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e",
+      "keyVersion": 1,
+      "recoveryKey": "3ae84a10ad1b5e1746c22a7a1f4d2b543da4da1f01461b7214edcc8307056cc8",
+      "recoveryKeyBundleKey": "ab80da090a0ae942c960dd67fe6662fc4cb2907f01d7b518947a11a3c6588c47",
+      "recoverySigningSeed": "bf78c5da538f3793385d5a042dcbca5f53363f2e6e2d0e9f24016ace5da921f6",
+      "recoverySigningPublicKey": "036fbb718073311dab9676de7a26de40c9a1beb67e8aa50fcb9b219eb3bb89d0"
+    },
+    {
+      "userId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e",
+      "keyVersion": 2,
+      "recoveryKey": "feec0fc8d25565cb093ffa7cd9448127462292e27df78809572d5e481f12a961",
+      "recoveryKeyBundleKey": "e44d8315f20c11afb27cf8cec8b544550b9e4f9ad8b3958d7100efc4723d3de3",
+      "recoverySigningSeed": "ca846f16f86ac96277a040f0b6bfb9c08374171fbff37f3d86b9bf56106d0675",
+      "recoverySigningPublicKey": "9c61322b8cb52d3656b188fd2d679f82856f7c8d1657fa3197bc759fea8521d0"
+    }
+  ],
+  "vaultKeys": [
+    {
+      "vaultId": "0192f5a3-0000-7aaa-8bbb-0123456789ab",
+      "keyVersion": 1,
+      "vaultKey": "b31dcb5cf61a8cbea26872cab3e4c228bac6b1985e599af0d6a9475dbc657a15",
+      "contentKey": "3b9a6dc7bc816720092531380aa00660f27d6638b3bc25cb78e50e83bb4f9185",
+      "wrapKey": "c087a11e871968cc1054af180f25a4fd144dd4e7289745dc26e17ab88c6c9fb5",
+      "keyCommitment": "96987e0d50bed9a8248b4b452063b2abb2cda29e3d2c081af5c3de6978e10ff9"
+    },
+    {
+      "vaultId": "0192f5a3-0000-7aaa-8bbb-0123456789ab",
+      "keyVersion": 2,
+      "vaultKey": "bb7b7499d326b971172a5625ffce1dcc88817845cd99f781ad457d082d8afef4",
+      "contentKey": "063e85cd1b2ec904ff2d66cc66a07f9cce1f0a297cc93e3c151c6e36bce943d6",
+      "wrapKey": "346299bbc1cafc8365a23134b17da8c30ad43bc30cab89bb2772e62fdd63e201",
+      "keyCommitment": "e49097f4e8861b573df4f33f007015b334d8c26b9ba961a43ad5ac5e3fdd3993"
+    },
+    {
+      "vaultId": "0192f5a3-0000-7aaa-8bbb-0123456789ab",
+      "keyVersion": 3,
+      "vaultKey": "4fb9b0e857043cbdae7fc68b1628ba5cd1f6e0dd1818d77e8fdd8a1b07333847",
+      "contentKey": "542649618f2f396cc4de225a941b9814b3d541188bdedaa16b70cec6a4b69b37",
+      "wrapKey": "4374927991da16ab53526ac90684b3f9a3422bdeaf82fadfa503ea6334b4d5fa",
+      "keyCommitment": "a27e100a79ef1109344813b6f333952bea65874fa102301f975e550f84041c63"
+    }
+  ],
+  "keyMismatch": {
+    "note": "A key opened for version 2 that is not the committed one must be refused with key_mismatch.",
+    "vaultId": "0192f5a3-0000-7aaa-8bbb-0123456789ab",
+    "keyVersion": 2,
+    "openedKey": "a7e3a0b97b9dc0f26f895dec3493daaf6515cff7e83a33767b057fe6d7a0d034",
+    "itsCommitment": "ce1a31e35b83d6ecbe61a31f35008571c51039718918aeb5273aaa68dc719412",
+    "committed": "e49097f4e8861b573df4f33f007015b334d8c26b9ba961a43ad5ac5e3fdd3993",
+    "reason": "key_mismatch"
+  },
+  "localState": [
+    {
+      "userId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e",
+      "localStateKey": "f14f14212de6b24004923999eb383cd1e9beeb3442de16d0e82e5eac203f104c",
+      "recordKey": "d56a5682309610360fe440cb3656f65ff138d5a6ed9b3739f0a47f9cd7665265"
+    },
+    {
+      "userId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e",
+      "localStateKey": "542e6211f4ef5b9c373721f85ab42d63fbdab441f543c81b11f5e70b5c10d095",
+      "recordKey": "22dee68ed37548e630b46d96b22dfcaa740c43609d13cc44db10a00163b3382d"
+    }
+  ]
+}

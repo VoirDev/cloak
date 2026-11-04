@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Prepare Release: resolves the next version from RELEASE_TYPE, refuses one that is already tagged or
+# prepared differently, and writes it to VERSION.
+#
+# Environment:
+#   RELEASE_TYPE   patch | minor | major
+#   GITHUB_OUTPUT  receives `version`, `tag` and `branch`
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+source ci/release/common.sh
+
+case "${RELEASE_TYPE:-}" in
+  patch | minor | major) ;;
+  *) fail "RELEASE_TYPE must be patch, minor or major, not '${RELEASE_TYPE:-}'." ;;
+esac
+: "${GITHUB_OUTPUT:?}"
+
+echo "==> Resolve the next version"
+current="$(read_version)"
+IFS=. read -r major minor patch <<<"$current"
+case "$RELEASE_TYPE" in
+  patch) next="$major.$minor.$((patch + 1))" ;;
+  minor) next="$major.$((minor + 1)).0" ;;
+  major) next="$((major + 1)).0.0" ;;
+esac
+tag="v$next"
+branch="release/$tag"
+echo "Current version $current, next $next ($RELEASE_TYPE)."
+
+if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+  fail "Tag $tag already exists; $next has been released."
+fi
+
+# A release branch of this version may exist from an earlier run; it must hold this version.
+if git ls-remote --exit-code --heads origin "refs/heads/$branch" >/dev/null; then
+  git fetch --no-tags origin "refs/heads/$branch:refs/remotes/origin/$branch"
+  existing="$(git show "origin/$branch:$VERSION_FILE" | tr -d '[:space:]')"
+  if [ "$existing" != "$next" ] && [ "$existing" != "$current" ]; then
+    fail "Branch $branch exists with version $existing; expected $next. Resolve it by hand."
+  fi
+  echo "Branch $branch exists; it will be updated, not replaced."
+fi
+
+echo "==> Write $next"
+printf '%s\n' "$next" >"$VERSION_FILE"
+[ "$(read_version)" = "$next" ] || fail "$VERSION_FILE does not hold $next after the update."
+
+{
+  echo "version=$next"
+  echo "tag=$tag"
+  echo "branch=$branch"
+} >>"$GITHUB_OUTPUT"

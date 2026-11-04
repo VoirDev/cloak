@@ -1,0 +1,53 @@
+{
+  "protocolVersion": 1,
+  "cryptoSuite": 1,
+  "generator": "cloak-protocol/tools/generate-vectors.mjs",
+  "description": "Strict Ed25519 (PROTOCOL.md §2, §11). signature = 0x01 || R || S. `reason` null means valid; otherwise it must be refused for that reason.",
+  "smallOrderPoints": [
+    "0100000000000000000000000000000000000000000000000000000000000000",
+    "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000080",
+    "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85"
+  ],
+  "cases": [
+    {
+      "name": "valid",
+      "publicKey": "fa82d22e9f45359db0fad7909573a83f3df285260ccbfe00ad0ca1b14b17d1da",
+      "message": "000d636c6f616b2f76312f74657374000e7374726963742045643235353139",
+      "signature": "0148f144de4128245d20f9326fce398e982cda6126e24536c1fe904073679daaee1f119b7b1ab7b2bea87db792f8ba04f4508d83c2803f28aa819778d016da9f02",
+      "reason": null
+    },
+    {
+      "name": "s-not-reduced",
+      "publicKey": "fa82d22e9f45359db0fad7909573a83f3df285260ccbfe00ad0ca1b14b17d1da",
+      "message": "000d636c6f616b2f76312f74657374000e7374726963742045643235353139",
+      "signature": "0148f144de4128245d20f9326fce398e982cda6126e24536c1fe904073679daaee0ce590d8341ac5167f1aaf35d7b4e308518d83c2803f28aa819778d016da9f12",
+      "reason": "non_canonical_signature"
+    },
+    {
+      "name": "r-not-canonical",
+      "publicKey": "fa82d22e9f45359db0fad7909573a83f3df285260ccbfe00ad0ca1b14b17d1da",
+      "message": "000d636c6f616b2f76312f74657374000e7374726963742045643235353139",
+      "signature": "01ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f1f119b7b1ab7b2bea87db792f8ba04f4508d83c2803f28aa819778d016da9f02",
+      "reason": "non_canonical_signature"
+    },
+    {
+      "name": "small-order-key",
+      "publicKey": "0100000000000000000000000000000000000000000000000000000000000000",
+      "message": "000d636c6f616b2f76312f74657374000e7374726963742045643235353139",
+      "signature": "0101000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "reason": "small_order_key"
+    },
+    {
+      "name": "wrong-message",
+      "publicKey": "fa82d22e9f45359db0fad7909573a83f3df285260ccbfe00ad0ca1b14b17d1da",
+      "message": "000d636c6f616b2f76312f74657374000e737472696374204564323535313900",
+      "signature": "0148f144de4128245d20f9326fce398e982cda6126e24536c1fe904073679daaee1f119b7b1ab7b2bea87db792f8ba04f4508d83c2803f28aa819778d016da9f02",
+      "reason": "bad_signature"
+    }
+  ]
+}

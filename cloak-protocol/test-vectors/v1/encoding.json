@@ -1,0 +1,402 @@
+{
+  "protocolVersion": 1,
+  "cryptoSuite": 1,
+  "generator": "cloak-protocol/tools/generate-vectors.mjs",
+  "description": "Canonical encoding (PROTOCOL.md §3). Encode `fields` in order and compare with `expected`.",
+  "cases": [
+    {
+      "name": "private-key-bundle-ad",
+      "fields": [
+        {
+          "type": "label",
+          "value": "cloak/v1/private-key-bundle"
+        },
+        {
+          "type": "uuid",
+          "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e"
+        },
+        {
+          "type": "u8",
+          "value": 1
+        },
+        {
+          "type": "u32",
+          "value": 2
+        }
+      ],
+      "expected": "001b636c6f616b2f76312f707269766174652d6b65792d62756e646c650192f5a47c3e7b1a9d2e5f6a7b8c9d0e0100000002"
+    },
+    {
+      "name": "recovery-key-bundle-ad",
+      "fields": [
+        {
+          "type": "label",
+          "value": "cloak/v1/recovery-key-bundle"
+        },
+        {
+          "type": "uuid",
+          "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e"
+        },
+        {
+          "type": "u8",
+          "value": 1
+        },
+        {
+          "type": "u32",
+          "value": 1
+        }
+      ],
+      "expected": "001c636c6f616b2f76312f7265636f766572792d6b65792d62756e646c650192f5a47c3e7b1a9d2e5f6a7b8c9d0e0100000001"
+    },
+    {
+      "name": "fingerprint-message",
+      "fields": [
+        {
+          "type": "label",
+          "value": "cloak/v1/fingerprint"
+        },
+        {
+          "type": "uuid",
+          "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e"
+        },
+        {
+          "type": "u8",
+          "value": 1
+        },
+        {
+          "type": "u32",
+          "value": 1
+        },
+        {
+          "type": "key32",
+          "value": "e676f99b4df540daf02f5a7c1c0eeed65a44f3236ffed351a56153d8b7e9882b"
+        },
+        {
+          "type": "key32",
+          "value": "fa82d22e9f45359db0fad7909573a83f3df285260ccbfe00ad0ca1b14b17d1da"
+        },
+        {
+          "type": "key32",
+          "value": "036fbb718073311dab9676de7a26de40c9a1beb67e8aa50fcb9b219eb3bb89d0"
+        }
+      ],
+      "expected": "0014636c6f616b2f76312f66696e6765727072696e740192f5a47c3e7b1a9d2e5f6a7b8c9d0e0100000001e676f99b4df540daf02f5a7c1c0eeed65a44f3236ffed351a56153d8b7e9882bfa82d22e9f45359db0fad7909573a83f3df285260ccbfe00ad0ca1b14b17d1da036fbb718073311dab9676de7a26de40c9a1beb67e8aa50fcb9b219eb3bb89d0"
+    },
+    {
+      "name": "key-statement-v2",
+      "fields": [
+        {
+          "type": "label",
+          "value": "cloak/v1/key-statement"
+        },
+        {
+          "type": "uuid",
+          "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e"
+        },
+        {
+          "type": "u32",
+          "value": 2
+        },
+        {
+          "type": "digest32",
+          "value": "24f27d24d80a37e2aee729da278e3240f04a6bf2cd5a36820ce31dd154f9d982"
+        },
+        {
+          "type": "digest32",
+          "value": "8531bd1439be6b680f509e26088cb811762da4845d26a0e7654e9b54a49a0850"
+        }
+      ],
+      "expected": "0016636c6f616b2f76312f6b65792d73746174656d656e740192f5a47c3e7b1a9d2e5f6a7b8c9d0e0000000224f27d24d80a37e2aee729da278e3240f04a6bf2cd5a36820ce31dd154f9d9828531bd1439be6b680f509e26088cb811762da4845d26a0e7654e9b54a49a0850"
+    },
+    {
+      "name": "envelope-context",
+      "fields": [
+        {
+          "type": "label",
+          "value": "cloak/v1/vault-key"
+        },
+        {
+          "type": "uuid",
+          "value": "0192f5a3-0000-7aaa-8bbb-0123456789ab"
+        },
+        {
+          "type": "u32",
+          "value": 2
+        },
+        {
+          "type": "uuid",
+          "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d1f"
+        },
+        {
+          "type": "u32",
+          "value": 1
+        }
+      ],
+      "expected": "0012636c6f616b2f76312f7661756c742d6b65790192f5a300007aaa8bbb0123456789ab000000020192f5a47c3e7b1a9d2e5f6a7b8c9d1f00000001"
+    },
+    {
+      "name": "vault-previous-ad",
+      "fields": [
+        {
+          "type": "label",
+          "value": "cloak/v1/vault-previous"
+        },
+        {
+          "type": "uuid",
+          "value": "0192f5a3-0000-7aaa-8bbb-0123456789ab"
+        },
+        {
+          "type": "u32",
+          "value": 2
+        }
+      ],
+      "expected": "0017636c6f616b2f76312f7661756c742d70726576696f75730192f5a300007aaa8bbb0123456789ab00000002"
+    },
+    {
+      "name": "section-content-ad",
+      "fields": [
+        {
+          "type": "label",
+          "value": "cloak/v1/section-content"
+        },
+        {
+          "type": "uuid",
+          "value": "0192f5a3-0000-7aaa-8bbb-0123456789ab"
+        },
+        {
+          "type": "uuid",
+          "value": "afdd515a-cdcf-5c88-8cb2-66e7b6db2dd9"
+        },
+        {
+          "type": "str",
+          "value": "billing"
+        },
+        {
+          "type": "u32",
+          "value": 3
+        }
+      ],
+      "expected": "0018636c6f616b2f76312f73656374696f6e2d636f6e74656e740192f5a300007aaa8bbb0123456789abafdd515acdcf5c888cb266e7b6db2dd9000762696c6c696e6700000003"
+    },
+    {
+      "name": "local-record-ad",
+      "fields": [
+        {
+          "type": "label",
+          "value": "cloak/v1/local-state"
+        },
+        {
+          "type": "str",
+          "value": "cloak/v1/0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e/pins"
+        }
+      ],
+      "expected": "0014636c6f616b2f76312f6c6f63616c2d73746174650032636c6f616b2f76312f30313932663561342d376333652d376231612d396432652d3566366137623863396430652f70696e73"
+    },
+    {
+      "name": "section-write-message",
+      "fields": [
+        {
+          "type": "label",
+          "value": "cloak/v1/section-write"
+        },
+        {
+          "type": "uuid",
+          "value": "0192f5a3-0000-7aaa-8bbb-0123456789ab"
+        },
+        {
+          "type": "uuid",
+          "value": "afdd515a-cdcf-5c88-8cb2-66e7b6db2dd9"
+        },
+        {
+          "type": "str",
+          "value": "compute.vps"
+        },
+        {
+          "type": "uuid",
+          "value": "0192f5a3-0000-7aaa-8bbb-0123456789ab"
+        },
+        {
+          "type": "uuid",
+          "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e"
+        },
+        {
+          "type": "str",
+          "value": "server-1"
+        },
+        {
+          "type": "str",
+          "value": "general"
+        },
+        {
+          "type": "u32",
+          "value": 2
+        },
+        {
+          "type": "u64",
+          "value": "7"
+        },
+        {
+          "type": "flag",
+          "value": 0
+        },
+        {
+          "type": "u64",
+          "value": "9"
+        },
+        {
+          "type": "digest32",
+          "value": "d02cdd9cdde4e523bf8d1997c9b760f6334fb0c657552456cb1136ac247ea2d9"
+        },
+        {
+          "type": "digest32",
+          "value": "37b12fd665c0155eafd49ba34c448ee89dec1a660c52fbbcee87df86d37aa2bd"
+        },
+        {
+          "type": "uuid",
+          "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d1f"
+        },
+        {
+          "type": "u32",
+          "value": 1
+        },
+        {
+          "type": "digest32",
+          "value": "b7b556d543d483cddbcdc37e6b611d20b9d7b8c06bd7233bc5d89e4d3d0cf0a3"
+        }
+      ],
+      "expected": "0016636c6f616b2f76312f73656374696f6e2d77726974650192f5a300007aaa8bbb0123456789abafdd515acdcf5c888cb266e7b6db2dd9000b636f6d707574652e7670730192f5a300007aaa8bbb0123456789ab0192f5a47c3e7b1a9d2e5f6a7b8c9d0e00087365727665722d31000767656e6572616c000000020000000000000007000000000000000009d02cdd9cdde4e523bf8d1997c9b760f6334fb0c657552456cb1136ac247ea2d937b12fd665c0155eafd49ba34c448ee89dec1a660c52fbbcee87df86d37aa2bd0192f5a47c3e7b1a9d2e5f6a7b8c9d1f00000001b7b556d543d483cddbcdc37e6b611d20b9d7b8c06bd7233bc5d89e4d3d0cf0a3"
+    },
+    {
+      "name": "vault-log-message",
+      "fields": [
+        {
+          "type": "label",
+          "value": "cloak/v1/vault-log"
+        },
+        {
+          "type": "uuid",
+          "value": "0192f5a3-0000-7aaa-8bbb-0123456789ab"
+        },
+        {
+          "type": "u64",
+          "value": "5"
+        },
+        {
+          "type": "digest32",
+          "value": "6847db3c7719098160dc095adee5e957395631a50c4d601adfbbe92f8f83141a"
+        },
+        {
+          "type": "u8",
+          "value": 6
+        },
+        {
+          "type": "uuid",
+          "value": "00000000-0000-0000-0000-000000000000"
+        },
+        {
+          "type": "u8",
+          "value": 0
+        },
+        {
+          "type": "u32",
+          "value": 2
+        },
+        {
+          "type": "digest32",
+          "value": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "type": "u32",
+          "value": 0
+        },
+        {
+          "type": "digest32",
+          "value": "c80f161cc3a86979a3d21aecb34745ae7f6d055ba6f9c6c3af66aac58c8924de"
+        },
+        {
+          "type": "digest32",
+          "value": "17b539540e2c48f74b500e7c15209603f87ec8bff9f189b1adb21e4c98192ae2"
+        },
+        {
+          "type": "flag",
+          "value": 1
+        },
+        {
+          "type": "uuid",
+          "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e"
+        },
+        {
+          "type": "u32",
+          "value": 1
+        },
+        {
+          "type": "uuid",
+          "value": "00000000-0000-0000-0000-000000000000"
+        },
+        {
+          "type": "uuid",
+          "value": "00000000-0000-0000-0000-000000000000"
+        },
+        {
+          "type": "str",
+          "value": ""
+        },
+        {
+          "type": "str",
+          "value": ""
+        }
+      ],
+      "expected": "0012636c6f616b2f76312f7661756c742d6c6f670192f5a300007aaa8bbb0123456789ab00000000000000056847db3c7719098160dc095adee5e957395631a50c4d601adfbbe92f8f83141a06000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000000000000c80f161cc3a86979a3d21aecb34745ae7f6d055ba6f9c6c3af66aac58c8924de17b539540e2c48f74b500e7c15209603f87ec8bff9f189b1adb21e4c98192ae2010192f5a47c3e7b1a9d2e5f6a7b8c9d0e00000001000000000000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "name": "nil-and-zero",
+      "fields": [
+        {
+          "type": "label",
+          "value": "cloak/v1/test"
+        },
+        {
+          "type": "uuid",
+          "value": "00000000-0000-0000-0000-000000000000"
+        },
+        {
+          "type": "digest32",
+          "value": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "type": "flag",
+          "value": 0
+        }
+      ],
+      "expected": "000d636c6f616b2f76312f7465737400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "name": "unicode-string",
+      "fields": [
+        {
+          "type": "label",
+          "value": "cloak/v1/test"
+        },
+        {
+          "type": "str",
+          "value": "Привет, 世界"
+        }
+      ],
+      "expected": "000d636c6f616b2f76312f746573740014d09fd180d0b8d0b2d0b5d1822c20e4b896e7958c"
+    },
+    {
+      "name": "u64-large",
+      "fields": [
+        {
+          "type": "label",
+          "value": "cloak/v1/test"
+        },
+        {
+          "type": "u64",
+          "value": "18446744073709551615"
+        }
+      ],
+      "expected": "000d636c6f616b2f76312f74657374ffffffffffffffff"
+    }
+  ]
+}

@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Publish Release: uploads the Maven repository the release pull request staged, unchanged, to GitHub
+# Packages. Every file is checked against maven.sha256 first. A file already in the registry counts
+# only when its bytes are the kept ones, so a rerun completes a release and never accepts different
+# content. Per artifact, the versioned files go first and its maven-metadata.xml last, and only when
+# the registry's metadata does not list the version yet.
+#
+#   ci/release/publish-maven [--dry-run] <kept-directory> <version>
+#
+# Environment (not needed with --dry-run, which only checks the kept files):
+#   GITHUB_REPOSITORY  owner/name, whose GitHub Packages Maven registry receives the artifacts
+#   GITHUB_ACTOR       the user the token belongs to
+#   GH_TOKEN           a token that may write packages: the job's GITHUB_TOKEN with packages: write
+#   MAVEN_REGISTRY     the registry's URL, for a test against another one (default GitHub Packages of
+#                      GITHUB_REPOSITORY)
+set -euo pipefail
+source "$(dirname "$0")/common.sh"
+
+dry_run=false
+if [ "${1:-}" = "--dry-run" ]; then
+  dry_run=true
+  shift
+fi
+if [ "$#" -ne 2 ]; then
+  echo "Usage: $0 [--dry-run] <kept-directory> <version>" >&2
+  exit 2
+fi
+version="$2"
+require_semver "$version"
+inventory="$(cd "$(dirname "$0")/../.." && read_packages)"
+cd "$1"
+
+echo "==> Check the kept Maven repository"
+[ "$(read_version VERSION)" = "$version" ] || fail "$1 holds release $(read_version VERSION), not $version."
+[ -s maven.sha256 ] || fail "$1 has no maven.sha256 manifest."
+shasum -a 256 --check --quiet maven.sha256
+[ "$(find maven -type f | LC_ALL=C sort)" = "$(cut -c67- maven.sha256)" ] ||
+  fail "maven/ holds files maven.sha256 does not list."
+while read -r artifact; do
+  [ -d "maven/$MAVEN_GROUP_PATH/$artifact/$version" ] || fail "maven/ lacks $artifact $version."
+done <<<"$inventory"
+echo "$(wc -l <maven.sha256 | tr -d ' ') files of $(wc -l <<<"$inventory" | tr -d ' ') artifacts, as built."
+if [ "$dry_run" = true ]; then
+  echo "Dry run: nothing is uploaded."
+  exit 0
+fi
+
+: "${GITHUB_REPOSITORY:?}" "${GITHUB_ACTOR:?}" "${GH_TOKEN:?GH_TOKEN is required.}"
+registry="${MAVEN_REGISTRY:-https://maven.pkg.github.com/$GITHUB_REPOSITORY}"
+config="$(mktemp)"
+response="$(mktemp)"
+trap 'rm -f "$config" "$response"' EXIT
+# The token reaches curl through a private config file, never its command line.
+(umask 077 && printf 'user = "%s:%s"\nsilent\nshow-error\nretry = 3\n' "$GITHUB_ACTOR" "$GH_TOKEN" >"$config")
+
+# Prints the HTTP status of GET <path>, the body in $response.
+fetch() { curl --config "$config" --output "$response" --write-out '%{http_code}' "$registry/$1"; }
+upload() { curl --config "$config" --fail --upload-file "maven/$1" "$registry/$1" >/dev/null; }
+
+uploaded=0
+while read -r artifact; do
+  echo "==> Publish $MAVEN_GROUP:$artifact:$version"
+  base="$MAVEN_GROUP_PATH/$artifact"
+  while read -r path; do
+    expected="$(awk -v path="maven/$path" '$2 == path { print $1 }' maven.sha256)"
+    status="$(fetch "$path")"
+    case "$status" in
+      200)
+        [ "$(shasum -a 256 "$response" | cut -c1-64)" = "$expected" ] ||
+          fail "$path is already published with different content."
+        ;;
+      404)
+        upload "$path"
+        uploaded=$((uploaded + 1))
+        ;;
+      *) fail "GET $path answered $status." ;;
+    esac
+  done < <(cd maven && find "$base/$version" -type f | LC_ALL=C sort)
+
+  status="$(fetch "$base/maven-metadata.xml")"
+  if [ "$status" = 200 ] && grep -q "<version>$version</version>" "$response"; then
+    echo "The registry lists $artifact $version."
+  elif [ "$status" = 200 ] || [ "$status" = 404 ]; then
+    while read -r path; do upload "$path"; done < <(cd maven && find "$base" -maxdepth 1 -type f -name 'maven-metadata.xml*' | LC_ALL=C sort)
+  else
+    fail "GET $base/maven-metadata.xml answered $status."
+  fi
+done <<<"$inventory"
+echo "Published $MAVEN_GROUP $version to $registry ($uploaded files uploaded, the rest already there)."

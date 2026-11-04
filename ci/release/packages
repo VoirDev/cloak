@@ -1,0 +1,8 @@
+# The Maven artifacts a release publishes, one artifactId per line, all in the group
+# dev.voir.cloak. The only list of them: build-artifacts fails unless the staged repository holds
+# exactly these, publish-maven uploads these, and finalize lists them in the GitHub Release. The
+# projects come from the publishing convention in build-logic.
+
+cloak-api-models
+cloak-server-core
+cloak-spring-boot-starter

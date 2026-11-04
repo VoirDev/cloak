@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Packs the built npm packages (build-artifacts builds them) as the tarballs Publish Release
+# publishes unchanged, and checks them: name, version, files and dependency ranges, that a consumer
+# installs them from the tarballs alone, and that they work there — a user id derives as the
+# protocol's vectors say and a client is created. Writes the tarballs and a SHA256SUMS manifest.
+#
+#   ci/release/pack-npm <output-directory> <version>
+#
+# Each package's manifest carries the release version only inside its tarball, and the repository's
+# LICENSE is copied in only while packing: the checkout is restored afterwards. Needs Node.js, npm,
+# pnpm and jq; reads no environment variables.
+set -euo pipefail
+source "$(dirname "$0")/common.sh"
+
+if [ "$#" -ne 2 ]; then
+  echo "Usage: $0 <output-directory> <version>" >&2
+  exit 2
+fi
+version="$2"
+require_semver "$version"
+mkdir -p "$1"
+output="$(cd "$1" && pwd)"
+cd "$(dirname "$0")/../.."
+root="$PWD"
+
+backups="$(mktemp -d)"
+consumer="$(mktemp -d)"
+restore() {
+  for entry in "${NPM_PACKAGES[@]}"; do
+    read -r _ directory prefix <<<"$entry"
+    [ -f "$backups/$prefix.json" ] && cp "$backups/$prefix.json" "$directory/package.json"
+    rm -f "$directory/LICENSE"
+  done
+  rm -rf "$backups" "$consumer"
+}
+trap restore EXIT
+
+tarballs=()
+for entry in "${NPM_PACKAGES[@]}"; do
+  read -r name directory prefix <<<"$entry"
+  echo "==> Pack $name $version"
+  [ -f "$directory/dist/index.js" ] || fail "$directory is not built; build it first (ci/release/build-artifacts)."
+  cp "$directory/package.json" "$backups/$prefix.json"
+  cp LICENSE "$directory/LICENSE"
+  (cd "$directory" && npm pkg set version="$version")
+  # pnpm rewrites the workspace: and catalog: ranges as publication would.
+  (cd cloak-ts && pnpm --filter "$name" pack --pack-destination "$output" >/dev/null)
+  tarball="$output/$prefix-$version.tgz"
+  [ -f "$tarball" ] || fail "pnpm pack did not write $tarball."
+
+  echo "==> Check $(basename "$tarball")"
+  packed="$(tar -xzOf "$tarball" package/package.json)"
+  [ "$(jq -r .name <<<"$packed")" = "$name" ] || fail "The tarball's package is not $name."
+  [ "$(jq -r .version <<<"$packed")" = "$version" ] || fail "The tarball's version is not $version."
+  [ "$(jq -r .license <<<"$packed")" = "Apache-2.0" ] || fail "$name is not licensed Apache-2.0."
+  if grep -qE '"(workspace|catalog):' <<<"$packed"; then
+    fail "$name's package.json keeps workspace: or catalog: ranges."
+  fi
+  # Sibling packages travel at exactly this version.
+  for other in "${NPM_PACKAGES[@]}"; do
+    read -r other_name _ _ <<<"$other"
+    dependency="$(jq -r --arg name "$other_name" '.dependencies[$name] // empty' <<<"$packed")"
+    [ -z "$dependency" ] || [ "$dependency" = "$version" ] ||
+      fail "$name depends on $other_name $dependency, not $version."
+  done
+  files="$(tar -tzf "$tarball" | LC_ALL=C sort)"
+  for required in package/LICENSE package/README.md package/package.json \
+    package/dist/index.js package/dist/index.d.ts package/src/index.ts; do
+    grep -qxF "$required" <<<"$files" || fail "$(basename "$tarball") lacks $required."
+  done
+  unexpected="$(grep -vE '^package/(LICENSE|README\.md|package\.json|(dist|src)/[A-Za-z0-9_./-]+\.(js|ts|d\.ts|js\.map|d\.ts\.map))$' <<<"$files" || true)"
+  [ -z "$unexpected" ] || fail "$(basename "$tarball") holds unexpected files: $(xargs <<<"$unexpected")."
+  tarballs+=("$tarball")
+done
+
+echo "==> Install the tarballs into a consumer and use them"
+vector="$(jq -c '.userIds[0]' "$root/cloak-protocol/test-vectors/v1/identity.json")"
+(
+  cd "$consumer"
+  npm init --yes >/dev/null
+  npm install --ignore-scripts --no-audit --no-fund "${tarballs[@]}" >/dev/null
+  node --input-type=module --eval "
+    import { cloakUserId } from '@voirdev/cloak-crypto';
+    import { createCloakClient, createMemoryStorage } from '@voirdev/cloak-client';
+    const vector = $vector;
+    if (cloakUserId(vector.hostUserId) !== vector.userId) throw new Error('The packed crypto derives another user id.');
+    const client = createCloakClient({ baseUrl: 'https://host.example/cloak/v1', storage: createMemoryStorage() });
+    if (typeof client.unlock !== 'function') throw new Error('The packed client has no unlock.');
+  "
+)
+
+(cd "$output" && shasum -a 256 ./*.tgz | sed 's# \./# #' >SHA256SUMS)
+echo "Packed $(cd "$output" && ls ./*.tgz | xargs -n1 basename | xargs)."

@@ -1,0 +1,184 @@
+name: Publish Release
+
+# Ships a merged release pull request. Nothing is verified or built here: Verify checked the release pull
+# request and built its Maven artifacts and npm packages, and this workflow uploads those unchanged to
+# GitHub Packages, then creates the tag vX.Y.Z and the GitHub Release, and deletes the Verify run's
+# artifact. docs/development.md#releases.
+#
+# It runs on the push to main that changes VERSION, not on the pull request event, so it acts on the
+# merged commit and with main's workflow file.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - VERSION
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-release
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    name: Detect release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+      should_publish: ${{ steps.release.outputs.should_publish }}
+      verify_run_id: ${{ steps.release.outputs.verify_run_id }}
+
+    steps:
+      - name: Checkout pushed commit
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      # Finds the merged release PR, compares its tree with the pushed commit, and finds the successful
+      # Verify run that holds its artifacts.
+      - name: Resolve release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ci/release/detect
+
+  approval:
+    name: Release approval
+    needs: detect
+    if: needs.detect.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: release
+
+    steps:
+      - name: Approved
+        env:
+          RELEASE_TAG: ${{ needs.detect.outputs.tag }}
+        run: echo "Publication of $RELEASE_TAG approved."
+
+  publish-maven:
+    name: Publish Maven artifacts
+    needs:
+      - detect
+      - approval
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      # The checkout of this repository, for ci/release.
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout pushed commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Download the verified release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ needs.detect.outputs.verify_run_id }}
+        run: gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name release-artifacts --dir "$RUNNER_TEMP/release-artifacts"
+
+      # Every file is checked against maven.sha256, then uploaded as built.
+      - name: Publish the Maven artifacts to GitHub Packages unchanged
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.detect.outputs.version }}
+        run: ci/release/publish-maven "$RUNNER_TEMP/release-artifacts" "$VERSION"
+
+  publish-npm:
+    name: Publish npm packages
+    needs:
+      - detect
+      - approval
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout pushed commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: cloak-ts/.nvmrc
+
+      - name: Download the verified release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ needs.detect.outputs.verify_run_id }}
+        run: gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name release-artifacts --dir "$RUNNER_TEMP/release-artifacts"
+
+      # The packed tarballs are published as built, after a check against their SHA256SUMS.
+      - name: Publish the npm packages to GitHub Packages unchanged
+        env:
+          VERSION: ${{ needs.detect.outputs.version }}
+          NODE_AUTH_TOKEN: ${{ github.token }}
+        run: ci/release/publish-npm "$RUNNER_TEMP/release-artifacts/npm" "$VERSION"
+
+  finalize:
+    name: Create tag and GitHub Release
+    needs:
+      - detect
+      - publish-maven
+      - publish-npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout pushed commit
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      - name: Create tag and GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.detect.outputs.tag }}
+        run: ci/release/finalize
+
+  delete-artifacts:
+    name: Delete the kept release artifacts
+    needs:
+      - detect
+      - finalize
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+
+    steps:
+      # The release is complete, and a rerun finds it so and publishes nothing, so the Verify run's
+      # artifact would only take storage until it expires.
+      - name: Delete the release artifacts of the Verify run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ needs.detect.outputs.verify_run_id }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name == "release-artifacts") | .id' |
+            while read -r id; do
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id"
+              echo "Deleted release-artifacts ($id)."
+            done

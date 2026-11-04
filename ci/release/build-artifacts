@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Build release artifacts: on a release pull request, after Verify passed for the same commit, builds
+# everything the release publishes, once, exercises it, and lays it out for Publish Release, which
+# uploads it unchanged:
+#
+#   1. every Maven publication staged into build/release/repository at the release version, with the
+#      revision in each POM, and checked against ci/release/packages: exactly those artifacts, each
+#      with its POM, Gradle module metadata and sources, no other version;
+#   2. a consumer build (ci/release/consumer) that resolves them from the staged repository alone and
+#      runs them;
+#   3. the npm packages built, packed at the release version and installed into a consumer
+#      (pack-npm), and checked as publication would (publish-npm --dry-run); and
+#   4. the output directory: maven/ with maven.sha256, npm/, VERSION.
+#
+# Environment:
+#   HEAD_REF     the release branch, release/vX.Y.Z; must match VERSION
+#   REVISION     the commit built, written into every POM
+#   OUTPUT       the output directory (default release-artifacts)
+#   GRADLE_ARGS  extra arguments to Gradle, such as --no-daemon (default none)
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+source ci/release/common.sh
+
+: "${HEAD_REF:?}" "${REVISION:?}"
+output="${OUTPUT:-release-artifacts}"
+read -r -a gradle_args <<<"${GRADLE_ARGS:-}"
+gradle() { ./gradlew "$@" ${gradle_args[@]+"${gradle_args[@]}"}; }
+
+echo "==> Check the release version"
+version="$(read_version)"
+[ "$HEAD_REF" = "release/v$version" ] || fail "$VERSION_FILE holds $version, which branch $HEAD_REF does not name."
+rm -rf "$output" "$STAGED_REPOSITORY"
+mkdir -p "$output"
+
+echo "==> Stage the Maven artifacts"
+gradle publishAllPublicationsToReleaseRepository -PreleaseVersion="$version" -PreleaseRevision="$REVISION"
+
+echo "==> Check the staged coordinates"
+expected="$(read_packages | LC_ALL=C sort)"
+staged="$(find "$STAGED_REPOSITORY/$MAVEN_GROUP_PATH" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | LC_ALL=C sort)"
+[ "$staged" = "$expected" ] || fail "The staged artifacts differ from $PACKAGES_FILE: $(diff <(echo "$expected") <(echo "$staged") | grep '^[<>]' | xargs)."
+[ -z "$(find "$STAGED_REPOSITORY" -mindepth 1 -maxdepth 1 ! -name dev)" ] || fail "$STAGED_REPOSITORY holds files outside $MAVEN_GROUP."
+while read -r artifact; do
+  directory="$STAGED_REPOSITORY/$MAVEN_GROUP_PATH/$artifact"
+  versions="$(find "$directory" -mindepth 1 -maxdepth 1 -type d -exec basename {} \;)"
+  [ "$versions" = "$version" ] || fail "$artifact is staged as $(xargs <<<"$versions"), not $version."
+  for suffix in .pom .module .jar -sources.jar; do
+    [ -s "$directory/$version/$artifact-$version$suffix" ] || fail "$artifact lacks $artifact-$version$suffix."
+  done
+  pom="$directory/$version/$artifact-$version.pom"
+  grep -q "<cloak.revision>$REVISION</cloak.revision>" "$pom" || fail "$artifact's POM does not name revision $REVISION."
+  grep -q "<url>https://www.apache.org/licenses/LICENSE-2.0" "$pom" ||
+    fail "$artifact's POM does not name the Apache-2.0 license."
+done < <(read_packages)
+echo "$(wc -l <<<"$expected" | tr -d ' ') artifacts staged at $version."
+
+echo "==> Resolve and run the staged artifacts in a consumer"
+gradle --project-dir ci/release/consumer run \
+  -PstagedRepository="$PWD/$STAGED_REPOSITORY" -PreleaseVersion="$version"
+
+echo "==> Build, pack and check the npm packages"
+(cd cloak-ts && pnpm install --frozen-lockfile && pnpm build)
+ci/release/pack-npm "$output/npm" "$version"
+ci/release/publish-npm --dry-run "$output/npm" "$version"
+
+echo "==> Lay out the release artifacts"
+cp -R "$STAGED_REPOSITORY" "$output/maven"
+(cd "$output" && find maven -type f | LC_ALL=C sort | xargs shasum -a 256 >maven.sha256)
+printf '%s\n' "$version" >"$output/VERSION"
+echo "Release $version is built in $output: $(wc -l <"$output/maven.sha256" | tr -d ' ') Maven files and $(cd "$output/npm" && ls ./*.tgz | xargs -n1 basename | xargs)."

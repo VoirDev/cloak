@@ -1,0 +1,62 @@
+{
+  "protocolVersion": 1,
+  "cryptoSuite": 1,
+  "generator": "cloak-protocol/tools/generate-vectors.mjs",
+  "description": "Envelopes: HPKE RFC 9180 mode_base, DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20-Poly1305 (PROTOCOL.md §4, §6.3). blob = 0x01 || enc || ciphertext || tag. ikmE/skE make these vectors reproducible; every implementation must open each blob with skR.",
+  "suite": {
+    "kemId": "0x0020",
+    "kdfId": "0x0001",
+    "aeadId": "0x0003"
+  },
+  "cases": [
+    {
+      "name": "vault-key-v1-to-owner-v1",
+      "recipient": "owner-v1",
+      "skR": "2657da9fb5672e9244a29e72bed73fca0a3c1ac16dba4f4f84420085ed5a3af5",
+      "pkR": "e676f99b4df540daf02f5a7c1c0eeed65a44f3236ffed351a56153d8b7e9882b",
+      "ikmE": "45111f81e04c32388b79dfb8fb9240856ae743b9a449af1a33226d2c8cad97da",
+      "skE": "761f36841c5c83b54d922c85effbed2799021c5dfd32ccecd6015a66a77761d5",
+      "enc": "de8eadbf335b14d0bf415b43576ad3340b0e3d2be99f675e0dc02350a5ad7942",
+      "info": "636c6f616b2f76312f7661756c742d6b6579",
+      "aad": "0012636c6f616b2f76312f7661756c742d6b65790192f5a300007aaa8bbb0123456789ab000000010192f5a47c3e7b1a9d2e5f6a7b8c9d0e00000001",
+      "plaintext": "b31dcb5cf61a8cbea26872cab3e4c228bac6b1985e599af0d6a9475dbc657a15",
+      "blob": "01de8eadbf335b14d0bf415b43576ad3340b0e3d2be99f675e0dc02350a5ad79427a6564a77e579193360f759dd718facfba0ca6f2546c605a390f2777d568d8cdbd0b9afe485b33c990c9238d02053e4b"
+    },
+    {
+      "name": "vault-key-v1-to-bob",
+      "recipient": "bob-v1",
+      "skR": "b2cd0737f57742b9a7db7b29c75b3897ff2c57062efe6862dbefd29d5e9cf4a6",
+      "pkR": "404ae889e43f0c1e66a96ca8b90a9e1b4ccc91ab4c0c2707a7b4f84e27298843",
+      "ikmE": "c5d57bfdcbba8d26e730887794da412e6544c1abaf1144a161c98d44efd41d86",
+      "skE": "7912d1b97c93567d3608febca0148389c0033963eac6c0f7cb5f9cdd79af1c4b",
+      "enc": "a2571db796ddda15494ef564203fc6f61c25748644a321caca01f98c9118b96c",
+      "info": "636c6f616b2f76312f7661756c742d6b6579",
+      "aad": "0012636c6f616b2f76312f7661756c742d6b65790192f5a300007aaa8bbb0123456789ab000000010192f5a47c3e7b1a9d2e5f6a7b8c9d1f00000001",
+      "plaintext": "b31dcb5cf61a8cbea26872cab3e4c228bac6b1985e599af0d6a9475dbc657a15",
+      "blob": "01a2571db796ddda15494ef564203fc6f61c25748644a321caca01f98c9118b96cffea0e67f69e124162bb0854e1085bed22e04b0bc5458dea3a4c6b73136dc512cd9475ad843dc57b143ce5acfe567e87"
+    },
+    {
+      "name": "vault-key-v2-to-owner-v2",
+      "recipient": "owner-v2",
+      "skR": "9dc0ec28c4145e96356101efd67dd996f8a7dc50377e32efc0852cc30d61c40c",
+      "pkR": "45132d817b5015b28d3af60d767c6a89a438888f42341fff0a664602e6ad453c",
+      "ikmE": "8ad013de3ede88e6b476cacec263410d4c3ea7845943601babce5e17de940609",
+      "skE": "306fd2a8288774343ea4595ce5825c3b557cd8e02ee78966fc37304d19c6dcc5",
+      "enc": "0d0c08fae431f451a0a79dcc3eec56581a0b83489b1a3da74d525b44cfef4155",
+      "info": "636c6f616b2f76312f7661756c742d6b6579",
+      "aad": "0012636c6f616b2f76312f7661756c742d6b65790192f5a300007aaa8bbb0123456789ab000000020192f5a47c3e7b1a9d2e5f6a7b8c9d0e00000002",
+      "plaintext": "bb7b7499d326b971172a5625ffce1dcc88817845cd99f781ad457d082d8afef4",
+      "blob": "010d0c08fae431f451a0a79dcc3eec56581a0b83489b1a3da74d525b44cfef415541c30bc09b56c4c0611cb7e917fa9e5cb91fbdc3bad3003e0b855c08932d26a5f1d3deea4bfab5302fb3c8522b67ade9"
+    }
+  ],
+  "negatives": [
+    {
+      "name": "envelope-wrong-user-key-version",
+      "skR": "9dc0ec28c4145e96356101efd67dd996f8a7dc50377e32efc0852cc30d61c40c",
+      "info": "636c6f616b2f76312f7661756c742d6b6579",
+      "aad": "0012636c6f616b2f76312f7661756c742d6b65790192f5a300007aaa8bbb0123456789ab000000020192f5a47c3e7b1a9d2e5f6a7b8c9d0e00000001",
+      "blob": "010d0c08fae431f451a0a79dcc3eec56581a0b83489b1a3da74d525b44cfef415541c30bc09b56c4c0611cb7e917fa9e5cb91fbdc3bad3003e0b855c08932d26a5f1d3deea4bfab5302fb3c8522b67ade9",
+      "reason": "decryption_failed"
+    }
+  ]
+}

@@ -1,0 +1,83 @@
+{
+  "protocolVersion": 1,
+  "cryptoSuite": 1,
+  "generator": "cloak-protocol/tools/generate-vectors.mjs",
+  "description": "Human-readable codes (PROTOCOL.md §10): Crockford base32, secret key, recovery key, fingerprint. Every negative must be refused with `reason`.",
+  "crockford": [
+    {
+      "input": "",
+      "expected": ""
+    },
+    {
+      "input": "66",
+      "expected": "CR"
+    },
+    {
+      "input": "666f6f626172",
+      "expected": "CSQPYRK1E8"
+    },
+    {
+      "input": "ffffffffff",
+      "expected": "ZZZZZZZZ"
+    }
+  ],
+  "secretKey": {
+    "bytes": "d6d1dd760ef9b165bb76f4a7d08320c1",
+    "code": "CS1-TV8X-TXGE-Z6RP-BEVP-YJKX-10S0-R6F0",
+    "lowercase": "cs1-tv8x-txge-z6rp-bevp-yjkx-10s0-r6f0"
+  },
+  "recoveryKey": {
+    "bytes": "3ae84a10ad1b5e1746c22a7a1f4d2b543da4da1f01461b7214edcc8307056cc8",
+    "code": "CR1-7BM4-M45D-3DF1-EHP2-59X1-YK9B-AGYT-9PGZ-0531-PWGM-XQ68-61R5-DK46-G56H"
+  },
+  "fingerprint": {
+    "identity": {
+      "name": "owner-v1",
+      "userId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e",
+      "keyVersion": 1,
+      "encryptionPrivateKey": "2657da9fb5672e9244a29e72bed73fca0a3c1ac16dba4f4f84420085ed5a3af5",
+      "encryptionPublicKey": "e676f99b4df540daf02f5a7c1c0eeed65a44f3236ffed351a56153d8b7e9882b",
+      "signingSeed": "c50b6e2df87d1cbadb324e30d0aae65ae8ac3d053c8ecc46eaf3ce4fa85cf127",
+      "signingPublicKey": "fa82d22e9f45359db0fad7909573a83f3df285260ccbfe00ad0ca1b14b17d1da",
+      "recoveryKey": "3ae84a10ad1b5e1746c22a7a1f4d2b543da4da1f01461b7214edcc8307056cc8",
+      "recoverySigningSeed": "bf78c5da538f3793385d5a042dcbca5f53363f2e6e2d0e9f24016ace5da921f6",
+      "recoverySigningPublicKey": "036fbb718073311dab9676de7a26de40c9a1beb67e8aa50fcb9b219eb3bb89d0",
+      "keysDigest": "8531bd1439be6b680f509e26088cb811762da4845d26a0e7654e9b54a49a0850"
+    },
+    "message": "0014636c6f616b2f76312f66696e6765727072696e740192f5a47c3e7b1a9d2e5f6a7b8c9d0e0100000001e676f99b4df540daf02f5a7c1c0eeed65a44f3236ffed351a56153d8b7e9882bfa82d22e9f45359db0fad7909573a83f3df285260ccbfe00ad0ca1b14b17d1da036fbb718073311dab9676de7a26de40c9a1beb67e8aa50fcb9b219eb3bb89d0",
+    "digest": "8531bd1439be6b680f509e26088cb811762da4845d26a0e7654e9b54a49a0850",
+    "code": "GMRV-T51S-QSNP-G3TG-KRK0-H35R-25V2-V944"
+  },
+  "negatives": [
+    {
+      "name": "secret-bad-checksum",
+      "kind": "secretKey",
+      "code": "CS1-TW8X-TXGE-Z6RP-BEVP-YJKX-10S0-R6F0",
+      "reason": "bad_code"
+    },
+    {
+      "name": "secret-padding-bits",
+      "kind": "secretKey",
+      "code": "CS1-TV8X-TXGE-Z6RP-BEVP-YJKX-10S0-R6F1",
+      "reason": "bad_code"
+    },
+    {
+      "name": "secret-no-prefix",
+      "kind": "secretKey",
+      "code": "TV8X-TXGE-Z6RP-BEVP-YJKX-10S0-R6F0",
+      "reason": "bad_code"
+    },
+    {
+      "name": "secret-wrong-prefix",
+      "kind": "secretKey",
+      "code": "CR1-TV8X-TXGE-Z6RP-BEVP-YJKX-10S0-R6F0",
+      "reason": "bad_code"
+    },
+    {
+      "name": "recovery-too-short",
+      "kind": "recoveryKey",
+      "code": "CR1-7BM4-M45D-3DF1-EHP2-59X1-YK9B-AGYT-9PGZ-0531-PWGM-XQ68-61R5-DK46-G5",
+      "reason": "bad_code"
+    }
+  ]
+}

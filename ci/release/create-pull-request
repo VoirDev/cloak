@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Prepare Release: commits the prepared VERSION on release/vX.Y.Z, pushes it and opens the release
+# pull request, or updates the one that exists. Never force-pushes.
+#
+# Environment:
+#   RELEASE_VERSION    the resolved version, MAJOR.MINOR.PATCH
+#   RELEASE_BRANCH     release/vX.Y.Z
+#   DEFAULT_BRANCH     the pull request's base
+#   RELEASE_BOT_NAME   author of the release commit
+#   RELEASE_BOT_EMAIL  its email address
+#   GH_TOKEN           the release bot's token, for gh; a pull request opened with the workflow's own
+#                      token would start no workflow, so Verify would never check the release
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+source ci/release/common.sh
+
+require_semver "${RELEASE_VERSION:-}"
+: "${RELEASE_BRANCH:?}" "${DEFAULT_BRANCH:?}" "${RELEASE_BOT_NAME:?}" "${RELEASE_BOT_EMAIL:?}" "${GH_TOKEN:?}"
+tag="v$RELEASE_VERSION"
+title="Release $tag"
+
+git config user.name "$RELEASE_BOT_NAME"
+git config user.email "$RELEASE_BOT_EMAIL"
+
+echo "==> Commit and push $RELEASE_BRANCH"
+if git ls-remote --exit-code --heads origin "refs/heads/$RELEASE_BRANCH" >/dev/null; then
+  # Apply the same edit on the existing branch; whatever else is on it stays.
+  git checkout --quiet -- .
+  git checkout --quiet -B "$RELEASE_BRANCH" "origin/$RELEASE_BRANCH"
+  printf '%s\n' "$RELEASE_VERSION" >"$VERSION_FILE"
+  git diff --check
+else
+  git checkout --quiet -b "$RELEASE_BRANCH"
+fi
+
+git add -- "$VERSION_FILE"
+if git diff --cached --quiet; then
+  echo "$RELEASE_BRANCH already holds $RELEASE_VERSION."
+else
+  git commit --quiet --message "$title"
+fi
+git push --quiet origin "HEAD:refs/heads/$RELEASE_BRANCH"
+
+echo "==> Open or update the release pull request"
+body="$(
+  cat <<BODY
+Bumps Cloak to **$tag** in \`$VERSION_FILE\`.
+
+- Verify runs \`ci/verify\` (job **Build and check whole repository**), then **Build release
+  artifacts** builds the Maven artifacts of \`$PACKAGES_FILE\` and the npm packages once, exercises
+  them in consumers and keeps them. Merging publishes exactly those to GitHub Packages after
+  approval in the \`release\` environment, then tags \`$tag\` and creates the GitHub Release.
+- Before merging: the branch is up to date with \`$DEFAULT_BRANCH\`, both required checks are green,
+  and CHANGELOG.md describes the release.
+
+See docs/development.md#releases.
+BODY
+)"
+
+number="$(gh pr list --head "$RELEASE_BRANCH" --base "$DEFAULT_BRANCH" --state open --json number --jq '.[0].number // empty')"
+if [ -n "$number" ]; then
+  gh pr edit "$number" --title "$title"
+  echo "Updated pull request #$number."
+else
+  gh pr create --head "$RELEASE_BRANCH" --base "$DEFAULT_BRANCH" --title "$title" --body "$body"
+fi

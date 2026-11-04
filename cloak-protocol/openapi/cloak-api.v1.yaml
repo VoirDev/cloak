@@ -1,0 +1,2985 @@
+openapi: 3.1.0
+
+info:
+  title: Cloak API
+  version: 1.0.0
+  summary: Zero-knowledge storage and sharing of encrypted records in vaults.
+  description: |
+    Cloak stores encrypted records (nodes) for registered users and the keys that let vault
+    members read them. The server never sees plaintext or unwrapped keys: every request body
+    carries ciphertext, sealed keys and signatures produced by a Cloak client, which checks
+    everything the server returns. The byte-level rules are in `cloak-protocol/PROTOCOL.md`.
+
+    ## Model
+
+    - A **vault** is the unit of access: members with roles, a versioned key sealed to each
+      member, and a signed, hash-chained **log** of every change to members, roles and keys.
+      Vaults are independent: there is no nesting and no access without an account.
+    - A **node** has an id and a type and is made of named **sections**. Each section lives in one
+      vault, encrypted with a key derived from that vault's key; the sections of one node may live
+      in different vaults.
+    - Every change to a section is a signed **write** that names the vault log head its writer saw
+      and the section's previous write.
+    - **Rotating** a vault's key, which removing members does, carries a **checkpoint**: a Merkle
+      root over the latest write of every section, which fixes which writes of people who lost the
+      right to write stay valid. Content is not re-encrypted.
+
+    ## Conventions
+
+    - **Base path.** Every path is relative to `/cloak/v1` on the host application.
+    - **Binary data.** Keys, hashes, ciphertext and signatures are base64url without padding
+      (RFC 4648 §5).
+    - **Opaque blobs.** `*Bundle`, `*WrappedKey`, `keyEnvelope`, `ciphertext` and `signature`
+      values start with a one-byte format version. The server checks the format version and size
+      only: it never parses the rest.
+    - **Signatures.** Clients sign a canonical binary encoding defined in `PROTOCOL.md`, not the
+      JSON body. The server rebuilds it from the request and the stored state and verifies it
+      against the signer's public key of the named version before storing anything.
+    - **Identifiers.** Clients generate vault and node ids (UUID); they are unique across the
+      server.
+    - **Instants.** RFC 3339 with an offset, microsecond precision.
+    - **Errors.** Every error is an RFC 9457 problem (`application/problem+json`) with a stable
+      `code`.
+    - **Pagination.** Lists use keyset pagination: pass `nextCursor` back as `cursor` until a page
+      has none. The vault log pages by `afterSeq`, a vault's sections by `afterChange`.
+    - **Absent values.** Optional fields without a value are omitted, never sent as `null`.
+    - **Hidden existence.** A vault or section the caller cannot see answers `404 not_found`, never
+      `403`, so ids do not leak.
+    - **Atomicity.** Each request runs in one transaction: it applies completely or not at all.
+
+    ## Roles
+
+    | Action | Viewer | Editor | Admin | Owner |
+    | --- | --- | --- | --- | --- |
+    | Read the vault, its log and its sections; leave it | yes | yes | yes | yes |
+    | Write, delete and move sections in the vault | no | yes | yes | yes |
+    | Add members, change roles below owner, remove members, rotate the key | no | no | yes | yes |
+    | Appoint or remove owners, delete the vault | no | no | no | yes |
+  contact:
+    name: Voir
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+
+servers:
+  - url: '{origin}/cloak/v1'
+    description: Mounted inside the host application by its adapter, such as the Spring Boot starter.
+    variables:
+      origin:
+        default: https://app.example.com
+        description: Origin of the host application.
+
+security:
+  - hostAuth: []
+
+tags:
+  - name: Meta
+    description: Protocol capabilities and limits.
+  - name: Identity
+    description: The caller's own keys, credential bundles and key replacement.
+  - name: Users
+    description: Other users' key versions and key statements.
+  - name: Vaults
+    description: Units of access, their keys, log and checkpoints.
+  - name: Members
+    description: Who belongs to a vault, roles, envelopes, leaving and rotation.
+  - name: Sections
+    description: Encrypted parts of nodes, written and read per vault.
+  - name: Nodes
+    description: All sections of a node the caller can read, across vaults.
+
+paths:
+  # ------------------------------------------------------------------------------------------
+  # Meta
+  # ------------------------------------------------------------------------------------------
+  /meta:
+    get:
+      tags: [Meta]
+      operationId: getMeta
+      summary: Get protocol capabilities and limits
+      description: Lets a client check compatibility before its first write. Needs no authentication.
+      security: []
+      responses:
+        '200':
+          description: Capabilities of this server.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Meta'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ------------------------------------------------------------------------------------------
+  # Identity
+  # ------------------------------------------------------------------------------------------
+  /identity:
+    get:
+      tags: [Identity]
+      operationId: getIdentity
+      summary: Get the caller's identity
+      description: |
+        Returns the current key version, its encrypted bundles and the KDF parameters a client
+        needs to unlock locally. `404 identity_required` means the caller has not registered yet.
+      responses:
+        '200':
+          description: The caller's identity.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Identity'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [Identity]
+      operationId: registerIdentity
+      summary: Register the caller's identity
+      description: |
+        Stores key version 1 with its self-signed key statement and the two encrypted bundles.
+        Called once per host user. `credentialsVersion` starts at 1.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterIdentityRequest'
+      responses:
+        '201':
+          description: Identity registered.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Identity'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /identity/deletion:
+    post:
+      tags: [Identity]
+      operationId: deleteIdentity
+      summary: Delete the caller's identity
+      description: |
+        Erases the caller's bundles, KDF parameters and host user id; key statements stay for the
+        logs that name them (`PROTOCOL.md` §5.7). The body is signed with the caller's current
+        signing key, so the host's session alone cannot delete an account, and expires at
+        `notAfter`, at most 10 minutes ahead, so a captured one cannot be sent again later.
+        Refused with `409 identity_in_vaults` while the caller is a member of a vault that is not
+        deleted. Afterwards every request of the caller answers `410 identity_deleted`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeleteIdentityRequest'
+      responses:
+        '204':
+          description: Identity deleted.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /identity/credentials:
+    put:
+      tags: [Identity]
+      operationId: updateCredentials
+      summary: Change the password or recover access
+      description: |
+        Replaces the private key bundle and KDF parameters after a password change or a recovery
+        (`PROTOCOL.md` §5.5). Keys and the recovery key do not change. Refused with
+        `409 credentials_version_conflict` when another device changed them first.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateCredentialsRequest'
+      responses:
+        '200':
+          description: Credentials updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Identity'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /identity/keys:
+    put:
+      tags: [Identity]
+      operationId: replaceKeys
+      summary: Replace the caller's identity keys
+      description: |
+        Stores key version n + 1 with its key statement, signed by the new signing key and by the
+        recovery signing key of version n, and the new bundles (`PROTOCOL.md` §5.6). The client then
+        records the replacement in each vault with `POST /vaults/{vaultId}/key-replacements`.
+        Refused with `409 identity_version_conflict` unless `expectedKeyVersion` is the current one.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplaceKeysRequest'
+      responses:
+        '200':
+          description: Keys replaced.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Identity'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ------------------------------------------------------------------------------------------
+  # Users
+  # ------------------------------------------------------------------------------------------
+  /users/{userId}/keys:
+    get:
+      tags: [Users]
+      operationId: getUserKeys
+      summary: Get a user's key versions
+      description: |
+        Every key version of a user with its key statement, oldest first, so a client can follow
+        the chain from the version it has pinned (`PROTOCOL.md` §5.2, §9).
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+      responses:
+        '200':
+          description: The user's key versions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserKeys'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /users/keys/batch-get:
+    post:
+      tags: [Users]
+      operationId: batchGetUserKeys
+      summary: Get several users' key versions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchGetUserKeysRequest'
+      responses:
+        '200':
+          description: Key versions of the users that have an identity.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchGetUserKeysResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ------------------------------------------------------------------------------------------
+  # Vaults
+  # ------------------------------------------------------------------------------------------
+  /vaults:
+    get:
+      tags: [Vaults]
+      operationId: listVaults
+      summary: List the caller's vaults
+      description: |
+        Vaults the caller is a member of and accepted, newest first; with `pending=true`, those
+        they were added to and have not accepted. Deleted vaults are not listed.
+      parameters:
+        - name: pending
+          in: query
+          description: List vaults awaiting the caller's acceptance instead.
+          schema:
+            type: boolean
+            default: false
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of vaults.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VaultPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [Vaults]
+      operationId: createVault
+      summary: Create a vault
+      description: |
+        Creates a vault with the caller as owner, its key version 1 sealed to the caller, and its
+        signed `vault_created` entry.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateVaultRequest'
+      responses:
+        '201':
+          description: Vault created.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Vault'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /vaults/batch-get:
+    post:
+      tags: [Vaults]
+      operationId: batchGetVaults
+      summary: Get several vaults with their next log entries
+      description: |
+        For each vault asked, its view as the caller sees it and one page of its log after
+        `afterSeq`, or `found: false` when the caller cannot see it. Every vault asked is answered,
+        in the order asked; a client treats a vault missing from the answer as a failed read, never
+        as one it left (`PROTOCOL.md` §12.4). Read the rest of a longer log with `listVaultLog`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchGetVaultsRequest'
+      responses:
+        '200':
+          description: Every vault asked, in order.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchGetVaultsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /rotations/batch-apply:
+    post:
+      tags: [Members]
+      operationId: batchRotateVaults
+      summary: Rotate several vaults together
+      description: |
+        Applies up to 100 rotation requests (`PROTOCOL.md` §7.4), one per vault, in one transaction:
+        all of them or none. Used to remove people from a group of vaults so that nobody is left
+        half removed (§12.4). Each item is checked exactly as `rotateVault` checks it; the first
+        refusal refuses the whole request, and its problem names the vault in `vaultId`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchRotateVaultsRequest'
+      responses:
+        '200':
+          description: Every vault rotated, in the order asked.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchRotateVaultsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /write-pauses:
+    post:
+      tags: [Members]
+      operationId: pauseWrites
+      summary: Pause section writes to vaults for a checkpoint
+      description: |
+        Pauses section writes to every vault named, all or none, for `Meta.limits.writePauseSeconds`
+        (`PROTOCOL.md` §7.5), so a request carrying a checkpoint cannot be outrun by writes. Needs
+        an editor or stronger in each vault. An admin's pause replaces anyone else's; an editor may
+        pause a vault at most once per `Meta.limits.writePauseIntervalSeconds` (`429 rate_limited`)
+        and only where nobody else's pause holds it (`409 pause_held`). Asking again renews the
+        caller's own pause. A
+        pause ends when a request of the caller carrying a checkpoint for the vault is applied,
+        when it is released, or when it runs out. It is the server's help only: clients never
+        depend on it for what they accept.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WritePauseRequest'
+      responses:
+        '200':
+          description: Writes paused in every vault named.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WritePause'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /write-pauses/release:
+    post:
+      tags: [Members]
+      operationId: releaseWritePauses
+      summary: End the caller's write pauses
+      description: Ends the caller's own pauses of the vaults named; vaults without one are ignored.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WritePauseRequest'
+      responses:
+        '204':
+          description: Released.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /vaults/{vaultId}:
+    get:
+      tags: [Vaults]
+      operationId: getVault
+      summary: Get a vault
+      parameters:
+        - $ref: '#/components/parameters/VaultId'
+      responses:
+        '200':
+          description: The vault as the caller sees it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Vault'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /vaults/{vaultId}/node-entries:
+    post:
+      tags: [Vaults]
+      operationId: appendNodeEntry
+      summary: Create, share or take back a node
+      description: |
+        Appends one signed `node_created`, `node_shared` or `node_unshared` entry (`PROTOCOL.md`
+        §7.7). Only the node's owner creates and shares it: its id derives from them. A node's
+        sections are valid only where these entries put it.
+      parameters:
+        - $ref: '#/components/parameters/VaultId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LogEntryRequest'
+      responses:
+        '200':
+          description: Entry appended.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Vault'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /vaults/{vaultId}/deletion:
+    post:
+      tags: [Vaults]
+      operationId: deleteVault
+      summary: Delete a vault
+      description: |
+        Appends an owner's signed `vault_deleted` (`PROTOCOL.md` §12.3) and removes the vault's
+        keys, envelopes, sections and checkpoint leaves. The log and member list stay, so members
+        verify who deleted it; nothing can be appended after it.
+      parameters:
+        - $ref: '#/components/parameters/VaultId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LogEntryRequest'
+      responses:
+        '204':
+          description: Vault deleted.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /vaults/{vaultId}/acceptance:
+    put:
+      tags: [Members]
+      operationId: acceptVault
+      summary: Accept a vault one was added to
+      description: |
+        Marks the caller's membership accepted (`PROTOCOL.md` §12.4). Until then the vault is
+        listed only with `pending=true` and the host does not count the caller for access checks.
+        Unsigned, the server's help against being added unasked; the log alone decides rights.
+      parameters:
+        - $ref: '#/components/parameters/VaultId'
+      responses:
+        '204':
+          description: Accepted.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /invitations/acceptance:
+    post:
+      tags: [Members]
+      operationId: acceptInviter
+      summary: Accept everything from one person
+      description: |
+        Accepts every vault the named user added the caller to, and every one they add later.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AcceptInviterRequest'
+      responses:
+        '204':
+          description: Accepted.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /vaults/{vaultId}/log:
+    get:
+      tags: [Vaults]
+      operationId: listVaultLog
+      summary: Read a vault's log
+      description: Entries oldest first, from `seq` 1 or after `afterSeq`. Every member reads and verifies it.
+      parameters:
+        - $ref: '#/components/parameters/VaultId'
+        - name: afterSeq
+          in: query
+          description: Only entries after this one. Omitted means from `seq` 1.
+          schema:
+            $ref: '#/components/schemas/LogSeq'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: One page of entries.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VaultLogPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /vaults/{vaultId}/keys:
+    get:
+      tags: [Vaults]
+      operationId: listVaultKeys
+      summary: List a vault's key versions
+      description: |
+        Each version after the first carries the previous key wrapped by itself, so a member
+        holding the current key can read content written under any earlier one. Oldest first.
+      parameters:
+        - $ref: '#/components/parameters/VaultId'
+        - name: afterVersion
+          in: query
+          description: Only versions after this one. Omitted means from version 1.
+          schema:
+            $ref: '#/components/schemas/VaultKeyVersion'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Key versions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VaultKeyList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /vaults/{vaultId}/checkpoints/{seq}/leaves:
+    get:
+      tags: [Vaults]
+      operationId: listCheckpointLeaves
+      summary: List a checkpoint's leaves
+      description: |
+        The leaves of the checkpoint carried by log entry `seq`, in checkpoint order, one page at a
+        time. A client that reads all `size` leaves recomputes the root and compares it
+        with the signed checkpoint, and then knows what the checkpoint holds for every section
+        without proofs (`PROTOCOL.md` §7.5).
+      parameters:
+        - $ref: '#/components/parameters/VaultId'
+        - name: seq
+          in: path
+          required: true
+          description: Log entry carrying the checkpoint.
+          schema:
+            $ref: '#/components/schemas/LogSeq'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/IndexLimit'
+      responses:
+        '200':
+          description: One page of leaves.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckpointLeafPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /vaults/{vaultId}/checkpoint-proofs/batch-get:
+    post:
+      tags: [Vaults]
+      operationId: batchGetCheckpointProofs
+      summary: Prove what checkpoints hold for some sections
+      description: |
+        For each item, what the checkpoint carried by log entry `checkpointSeq` holds for the
+        section: its leaf with the RFC 6962 audit path, or the two neighbouring leaves with theirs to
+        show it is absent (`PROTOCOL.md` §7.5). Items may name different checkpoints of the vault.
+      parameters:
+        - $ref: '#/components/parameters/VaultId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchGetCheckpointProofsRequest'
+      responses:
+        '200':
+          description: One proof per item, in request order.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchGetCheckpointProofsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ------------------------------------------------------------------------------------------
+  # Members
+  # ------------------------------------------------------------------------------------------
+  /vaults/{vaultId}/members:
+    post:
+      tags: [Members]
+      operationId: addMember
+      summary: Add a member
+      description: |
+        Adds a user with a role, the current vault key sealed to their newest key version, and the
+        signed `member_added` entry. Needs an admin, or an owner to add an owner.
+      parameters:
+        - $ref: '#/components/parameters/VaultId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddMemberRequest'
+      responses:
+        '201':
+          description: Member added.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Vault'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /vaults/{vaultId}/members/{userId}:
+    patch:
+      tags: [Members]
+      operationId: setMemberRole
+      summary: Change a member's role
+      description: |
+        Signed `member_role_set`. Taking away the right to write carries a checkpoint. A member may
+        lower their own role; otherwise it needs an admin, or an owner when an owner is involved.
+      parameters:
+        - $ref: '#/components/parameters/VaultId'
+        - $ref: '#/components/parameters/UserId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetMemberRoleRequest'
+      responses:
+        '200':
+          description: Role changed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Vault'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /vaults/{vaultId}/members/{userId}/envelope:
+    put:
+      tags: [Members]
+      operationId: deliverEnvelope
+      summary: Deliver a member's envelope
+      description: |
+        Stores a new envelope of the current vault key for a member, sealed to their committed key
+        version (`PROTOCOL.md` §6.3). Unsigned: the member checks the key against its commitment.
+        A member may deliver their own; an admin anyone's.
+      parameters:
+        - $ref: '#/components/parameters/VaultId'
+        - $ref: '#/components/parameters/UserId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeliverEnvelopeRequest'
+      responses:
+        '204':
+          description: Envelope stored.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /vaults/{vaultId}/departures:
+    post:
+      tags: [Members]
+      operationId: leaveVault
+      summary: Leave a vault
+      description: |
+        The caller removes themselves with a signed `member_removed`, with a checkpoint when they
+        could write. The key is not rotated; admins see that a rotation is due.
+      parameters:
+        - $ref: '#/components/parameters/VaultId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LeaveVaultRequest'
+      responses:
+        '204':
+          description: The caller left.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /vaults/{vaultId}/rotations:
+    post:
+      tags: [Members]
+      operationId: rotateVault
+      summary: Rotate the vault key, removing members
+      description: |
+        A rotation request (`PROTOCOL.md` §7.4): zero or more `member_removed`, then `key_rotated`
+        with its commitment and checkpoint; the previous key wrapped by the new one; and an
+        envelope for every remaining member whose key version is not superseded. Refused with
+        `409 recipients_mismatch` when the envelopes do not match, and `409 checkpoint_conflict`
+        when the checkpoint does not match the stored latest writes.
+      parameters:
+        - $ref: '#/components/parameters/VaultId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RotateVaultRequest'
+      responses:
+        '200':
+          description: Key rotated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Vault'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /vaults/{vaultId}/key-replacements:
+    post:
+      tags: [Members]
+      operationId: recordKeyReplacement
+      summary: Record the caller's key replacement in a vault
+      description: |
+        Signed `member_keys_replaced` with the caller's new keys, a checkpoint when the caller could
+        write, and the caller's envelope of the current vault key sealed to the new keys, or none
+        for an admin to deliver (`PROTOCOL.md` §5.6). The old keys lose every right in the vault.
+      parameters:
+        - $ref: '#/components/parameters/VaultId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecordKeyReplacementRequest'
+      responses:
+        '200':
+          description: Replacement recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Vault'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ------------------------------------------------------------------------------------------
+  # Sections
+  # ------------------------------------------------------------------------------------------
+  /vaults/{vaultId}/sections:
+    get:
+      tags: [Sections]
+      operationId: listVaultSections
+      summary: List a vault's sections in change order
+      description: |
+        The latest write of each section of the vault, deletions included, ordered by the change
+        number of that write, and the sections the host removed (`removed`). A page covers every
+        change after `afterChange` up to `throughChangeSeq`; pass that back as `afterChange` to
+        receive only what changed since, until it equals `lastChangeSeq`. A client keeps a replica
+        up to date this way.
+      parameters:
+        - $ref: '#/components/parameters/VaultId'
+        - name: afterChange
+          in: query
+          description: Only sections whose latest write came after this change number. Omitted means all.
+          schema:
+            $ref: '#/components/schemas/ChangeSeq'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: One page of section writes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SectionPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /vaults/{vaultId}/section-headers:
+    get:
+      tags: [Sections]
+      operationId: listVaultSectionHeaders
+      summary: List a vault's section headers in change order
+      description: |
+        Like `listVaultSections`, without the ciphertext: each latest write's signed fields with
+        `ciphertextHash` in its place. A header is enough to check a write's signature and standing
+        (`PROTOCOL.md` §8.4), which is what a checkpoint's author needs; pages are larger.
+      parameters:
+        - $ref: '#/components/parameters/VaultId'
+        - name: afterChange
+          in: query
+          description: Only sections whose latest write came after this change number. Omitted means all.
+          schema:
+            $ref: '#/components/schemas/ChangeSeq'
+        - $ref: '#/components/parameters/IndexLimit'
+      responses:
+        '200':
+          description: One page of section headers.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SectionHeaderPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /vaults/{vaultId}/sections/{nodeId}/{sectionName}:
+    get:
+      tags: [Sections]
+      operationId: getSection
+      summary: Read a section
+      description: The section's latest write.
+      parameters:
+        - $ref: '#/components/parameters/VaultId'
+        - $ref: '#/components/parameters/NodeId'
+        - $ref: '#/components/parameters/SectionName'
+      responses:
+        '200':
+          description: The latest write.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SectionWrite'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags: [Sections]
+      operationId: writeSection
+      summary: Write a section
+      description: |
+        Creates, changes or deletes a section with one signed write (`PROTOCOL.md` §8.3). The write
+        cites the current log head, uses the current key version, and chains to the stored latest
+        write. Refused with `409 version_conflict` when someone wrote first, `409 stale_head` when
+        the log moved on, and `409 vault_key_version_mismatch` when the key rotated.
+      parameters:
+        - $ref: '#/components/parameters/VaultId'
+        - $ref: '#/components/parameters/NodeId'
+        - $ref: '#/components/parameters/SectionName'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SectionWriteInput'
+      responses:
+        '200':
+          description: The stored write, without its ciphertext.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SectionHeader'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /sections/batch-write:
+    post:
+      tags: [Sections]
+      operationId: batchWriteSections
+      summary: Write several sections at once
+      description: |
+        Up to `maxBatchSize` writes, in any of the caller's vaults, applied together or not at all:
+        the sections of one record, or a move (a deletion in one vault and a first write in
+        another). Each write follows the rules of `writeSection`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchWriteRequest'
+      responses:
+        '200':
+          description: The stored writes without their ciphertext, in request order.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchWriteResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ------------------------------------------------------------------------------------------
+  # Nodes
+  # ------------------------------------------------------------------------------------------
+  /nodes/{nodeId}:
+    get:
+      tags: [Nodes]
+      operationId: getNode
+      summary: Read a node
+      description: The latest write of each of the node's sections in vaults the caller belongs to.
+      parameters:
+        - $ref: '#/components/parameters/NodeId'
+      responses:
+        '200':
+          description: The node's readable sections.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeSections'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /nodes/batch-get:
+    post:
+      tags: [Nodes]
+      operationId: batchGetNodes
+      summary: Read several nodes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchGetNodesRequest'
+      responses:
+        '200':
+          description: The readable sections of each node found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchGetNodesResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    hostAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Placeholder for the host application's own authentication (session cookie, bearer token,
+        OIDC). The host's adapter resolves the caller's host user id through
+        `CloakPrincipalResolver`, and Cloak derives its `userId` from it (`PROTOCOL.md` §5.0);
+        Cloak stores no login credentials.
+
+  parameters:
+    UserId:
+      name: userId
+      in: path
+      required: true
+      description: Host user id.
+      schema:
+        $ref: '#/components/schemas/Uuid'
+    VaultId:
+      name: vaultId
+      in: path
+      required: true
+      description: Vault id.
+      schema:
+        $ref: '#/components/schemas/Uuid'
+    NodeId:
+      name: nodeId
+      in: path
+      required: true
+      description: Node id.
+      schema:
+        $ref: '#/components/schemas/Uuid'
+    SectionName:
+      name: sectionName
+      in: path
+      required: true
+      description: Section name.
+      schema:
+        $ref: '#/components/schemas/SectionName'
+    Limit:
+      name: limit
+      in: query
+      description: Page size.
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+        maximum: 100
+        default: 50
+    IndexLimit:
+      name: limit
+      in: query
+      description: Page size of an index listing, whose items are small.
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+        maximum: 1000
+        default: 1000
+    Cursor:
+      name: cursor
+      in: query
+      description: '`nextCursor` from the previous page. Omitted for the first page.'
+      schema:
+        $ref: '#/components/schemas/Cursor'
+
+  headers:
+    Location:
+      description: URL of the created resource.
+      schema:
+        type: string
+        format: uri-reference
+    RetryAfter:
+      description: Seconds to wait before retrying.
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+
+  responses:
+    BadRequest:
+      description: The request is malformed, breaks a validation rule, or carries a log entry that breaks a rule.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: urn:cloak:problem:validation_failed
+            title: Validation failed
+            status: 400
+            code: validation_failed
+            detail: The request has 1 invalid field.
+            instance: /cloak/v1/vaults
+            traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+            errors:
+              - pointer: /log/role
+                code: enum
+                message: Must be viewer, editor, admin or owner.
+    Unauthorized:
+      description: No valid host session.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: urn:cloak:problem:unauthenticated
+            title: Authentication required
+            status: 401
+            code: unauthenticated
+    Forbidden:
+      description: |
+        The caller can see the vault but its role is too weak, for example writing as a viewer.
+        Vaults the caller cannot see answer 404 instead.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: urn:cloak:problem:role_required
+            title: Stronger role required
+            status: 403
+            code: role_required
+            role: editor
+    NotFound:
+      description: The resource does not exist or the caller cannot see it.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: urn:cloak:problem:not_found
+            title: Not found
+            status: 404
+            code: not_found
+    Conflict:
+      description: The request conflicts with the current state.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: urn:cloak:problem:version_conflict
+            title: Version conflict
+            status: 409
+            code: version_conflict
+            detail: The section was written by someone else since you read it.
+            currentVersion: 8
+    PayloadTooLarge:
+      description: |
+        The body is larger than `Meta.limits.maxRequestBytes`, or a section's ciphertext larger
+        than `Meta.limits.maxSectionBytes`.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: urn:cloak:problem:payload_too_large
+            title: Payload too large
+            status: 413
+            code: payload_too_large
+    Gone:
+      description: The caller's identity, or the user the request names, is deleted.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: urn:cloak:problem:identity_deleted
+            title: Identity deleted
+            status: 410
+            code: identity_deleted
+    TooManyRequests:
+      description: The host's request guard refused the request; retry after `Retry-After`.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: urn:cloak:problem:rate_limited
+            title: Too many requests
+            status: 429
+            code: rate_limited
+    ServiceUnavailable:
+      description: |
+        The vault is busy with another change, or the request ran out of database time; retry
+        after `Retry-After`. Nothing was applied.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: urn:cloak:problem:busy
+            title: Busy
+            status: 503
+            code: busy
+    InternalError:
+      description: Unexpected server failure. `traceId` identifies it in the server logs.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: urn:cloak:problem:internal_error
+            title: Internal error
+            status: 500
+            code: internal_error
+            traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+
+  schemas:
+    # ----------------------------------------------------------------------------------------
+    # Primitives
+    # ----------------------------------------------------------------------------------------
+    HostUserId:
+      type: string
+      description: |
+        The host application's own id of a user, as its authentication gives it (`PROTOCOL.md`
+        §5.0). The user's `userId` is `UUIDv5(715ec4b7-23ef-5724-a2a7-6bd5871ab13d, hostUserId)`;
+        a client accepts a host user id only when it derives that `userId`.
+      minLength: 1
+      maxLength: 255
+      examples: [user@example.com]
+    Uuid:
+      type: string
+      format: uuid
+      description: RFC 9562 UUID, lowercase hyphenated.
+      examples: [0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e]
+    Timestamp:
+      type: string
+      format: date-time
+      description: RFC 3339 instant with offset, microsecond precision.
+      examples: ['2026-11-05T10:15:30.123456Z']
+    Base64Url:
+      type: string
+      contentEncoding: base64url
+      pattern: '^[A-Za-z0-9_-]*$'
+      description: Base64url without padding.
+    Key32:
+      allOf:
+        - $ref: '#/components/schemas/Base64Url'
+      minLength: 43
+      maxLength: 43
+      description: Exactly 32 bytes, base64url (43 characters).
+    Salt16:
+      allOf:
+        - $ref: '#/components/schemas/Base64Url'
+      minLength: 22
+      maxLength: 22
+      description: Exactly 16 bytes, base64url (22 characters).
+    Blob:
+      allOf:
+        - $ref: '#/components/schemas/Base64Url'
+      minLength: 2
+      maxLength: 65536
+      description: Opaque versioned blob (first byte = format version), at most 48 KiB.
+    SignatureBlob:
+      allOf:
+        - $ref: '#/components/schemas/Base64Url'
+      minLength: 87
+      maxLength: 87
+      description: Signature blob, 0x01 followed by an Ed25519 signature; exactly 65 bytes.
+    Ciphertext:
+      allOf:
+        - $ref: '#/components/schemas/Base64Url'
+      minLength: 396
+      maxLength: 1398102
+      description: Section ciphertext, an encrypted blob of whole 256-byte padded blocks, at most 1 MiB.
+    SectionName:
+      type: string
+      pattern: '^[a-z][a-z0-9_]{0,63}$'
+      examples: [general]
+    NodeType:
+      type: string
+      pattern: '^[a-z][a-z0-9_.-]{0,63}$'
+      description: App-defined type, visible to the server.
+      examples: [compute.vps]
+    IdentityKeyVersion:
+      type: integer
+      format: int32
+      minimum: 1
+      description: Version of a user's identity keys.
+    VaultKeyVersion:
+      type: integer
+      format: int32
+      minimum: 1
+    DataVersion:
+      type: integer
+      format: int64
+      minimum: 1
+    LogSeq:
+      type: integer
+      format: int64
+      minimum: 1
+    ChangeSeq:
+      type: integer
+      format: int64
+      minimum: 1
+      description: Number of a section write within its vault, increasing with every write.
+    CryptoSuite:
+      type: integer
+      format: int32
+      enum: [1]
+    Role:
+      type: string
+      enum: [viewer, editor, admin, owner]
+    LogEntryKind:
+      type: string
+      enum: [vault_created, member_added, member_role_set, member_removed, member_keys_replaced, key_rotated, node_created, node_shared, node_unshared, vault_deleted]
+    Cursor:
+      type: string
+      maxLength: 512
+      description: Opaque keyset cursor.
+
+    # ----------------------------------------------------------------------------------------
+    # Meta
+    # ----------------------------------------------------------------------------------------
+    Meta:
+      type: object
+      required: [apiVersion, protocolVersion, cryptoSuites, blobFormats, limits]
+      properties:
+        apiVersion:
+          type: string
+          examples: [1.0.0]
+        protocolVersion:
+          type: integer
+          format: int32
+          description: Version of the signing and encoding rules in `cloak-protocol`.
+          examples: [1]
+        cryptoSuites:
+          type: array
+          items:
+            $ref: '#/components/schemas/CryptoSuite'
+        blobFormats:
+          type: object
+          required: [accepted, deprecated]
+          properties:
+            accepted:
+              type: array
+              description: Format versions accepted on write.
+              items:
+                type: integer
+                format: int32
+            deprecated:
+              type: array
+              description: Format versions still readable but rejected on write.
+              items:
+                type: integer
+                format: int32
+        limits:
+          $ref: '#/components/schemas/Limits'
+    Limits:
+      type: object
+      required: [maxPendingInvitations, maxPendingInvitationsPerInviter, maxSectionBytes, maxRequestBytes, maxBatchSize, maxPageSize, maxIndexPageSize, maxMembersPerVault, maxSectionsPerVault, maxStoredSectionsPerVault, writePauseSeconds, writePauseIntervalSeconds, kdf]
+      properties:
+        maxPendingInvitations:
+          type: integer
+          format: int32
+          description: |
+            Most vaults a user may be added to and not have accepted. Adding one more answers
+            `409 too_many_invitations`; accepting or leaving makes room.
+          examples: [1000]
+        maxPendingInvitationsPerInviter:
+          type: integer
+          format: int32
+          description: |
+            Most vaults one person may add a user to that the user has not accepted. Adding one more
+            answers `409 too_many_invitations`.
+          examples: [100]
+        maxSectionBytes:
+          type: integer
+          format: int32
+          examples: [1048576]
+        maxRequestBytes:
+          type: integer
+          format: int32
+          description: |
+            Largest request body. Never below what the largest rotation and checkpoint need, so
+            taking access away always fits. A batch write applies together or not at all, so it is
+            never split: the app keeps each batch within this limit. A larger body answers
+            `413 payload_too_large`.
+          examples: [16777216]
+        maxBatchSize:
+          type: integer
+          format: int32
+          description: Maximum items per batch call and envelopes per rotation.
+          examples: [100]
+        maxPageSize:
+          type: integer
+          format: int32
+          examples: [100]
+        maxIndexPageSize:
+          type: integer
+          format: int32
+          description: Page size of index listings (section headers, checkpoint leaves).
+          examples: [1000]
+        maxMembersPerVault:
+          type: integer
+          format: int32
+          description: |
+            Maximum members of one vault, so a rotation fits in one request. Adding one more answers
+            `400 validation_failed`, rule `max_members`.
+          examples: [1000]
+        maxSectionsPerVault:
+          type: integer
+          format: int32
+          description: |
+            Maximum live sections of one vault, so a checkpoint stays bounded; a deleted section
+            does not count. Writing one more answers `400 validation_failed`, rule `max_sections`.
+          examples: [100000]
+        maxStoredSectionsPerVault:
+          type: integer
+          format: int32
+          description: |
+            Maximum sections one vault stores, deleted ones included: a deletion is kept without
+            content so the section's next write chains to it. Creating a section beyond it answers
+            `400 validation_failed`, rule `max_stored_sections`; writing an existing one never does.
+          examples: [1000000]
+        writePauseSeconds:
+          type: integer
+          format: int32
+          description: How long a write pause holds a vault.
+          examples: [30]
+        writePauseIntervalSeconds:
+          type: integer
+          format: int32
+          description: Least time between two pauses of one vault by the same editor.
+          examples: [300]
+        kdf:
+          type: object
+          description: Argon2id bounds; clients refuse parameters outside them (`PROTOCOL.md` §5.3).
+          required: [minMemoryKib, maxMemoryKib, minIterations, maxIterations]
+          properties:
+            minMemoryKib:
+              type: integer
+              format: int32
+              examples: [65536]
+            maxMemoryKib:
+              type: integer
+              format: int32
+              examples: [1048576]
+            minIterations:
+              type: integer
+              format: int32
+              examples: [2]
+            maxIterations:
+              type: integer
+              format: int32
+              examples: [10]
+
+    # ----------------------------------------------------------------------------------------
+    # Identity and users
+    # ----------------------------------------------------------------------------------------
+    KdfParams:
+      type: object
+      description: Argon2id parameters the client uses to derive the master key.
+      required: [algorithm, salt, memoryKib, iterations, parallelism]
+      properties:
+        algorithm:
+          type: string
+          const: argon2id
+        salt:
+          $ref: '#/components/schemas/Salt16'
+        memoryKib:
+          type: integer
+          format: int32
+          minimum: 65536
+          maximum: 1048576
+        iterations:
+          type: integer
+          format: int32
+          minimum: 2
+          maximum: 10
+        parallelism:
+          type: integer
+          format: int32
+          const: 1
+          description: Always 1 in crypto suite 1.
+    PublicKeys:
+      type: object
+      description: One version of a user's public keys (`PROTOCOL.md` §5.1).
+      required: [userId, keyVersion, cryptoSuite, encryptionPublicKey, signingPublicKey, recoverySigningPublicKey]
+      properties:
+        userId:
+          $ref: '#/components/schemas/Uuid'
+        keyVersion:
+          $ref: '#/components/schemas/IdentityKeyVersion'
+        cryptoSuite:
+          $ref: '#/components/schemas/CryptoSuite'
+        encryptionPublicKey:
+          $ref: '#/components/schemas/Key32'
+        signingPublicKey:
+          $ref: '#/components/schemas/Key32'
+        recoverySigningPublicKey:
+          $ref: '#/components/schemas/Key32'
+    KeyStatement:
+      type: object
+      description: |
+        A key version with its statement (`PROTOCOL.md` §5.2): signed by its own signing key, and
+        from version 2 on also by the previous version's recovery signing key.
+      required: [keys, signature]
+      properties:
+        keys:
+          $ref: '#/components/schemas/PublicKeys'
+        previousKeysDigest:
+          description: '`keysDigest` of the previous version; absent for version 1.'
+          $ref: '#/components/schemas/Key32'
+        signature:
+          $ref: '#/components/schemas/SignatureBlob'
+        recoverySignature:
+          description: Signature by the previous version's recovery signing key; absent for version 1.
+          $ref: '#/components/schemas/SignatureBlob'
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+    UserKeys:
+      type: object
+      required: [userId, deleted, versions]
+      properties:
+        userId:
+          $ref: '#/components/schemas/Uuid'
+        hostUserId:
+          description: The host's id of the user, absent once the identity is deleted.
+          $ref: '#/components/schemas/HostUserId'
+        deleted:
+          type: boolean
+          description: |
+            Whether the identity is deleted (`PROTOCOL.md` §5.7). Unsigned: a client only does less
+            because of it, such as not sealing vault keys to the user.
+        versions:
+          type: array
+          description: Every key version, oldest first.
+          items:
+            $ref: '#/components/schemas/KeyStatement'
+    Identity:
+      type: object
+      required: [hostUserId, keys, kdf, privateKeyBundle, recoveryKeyBundle, credentialsVersion, createdAt, updatedAt]
+      properties:
+        hostUserId:
+          $ref: '#/components/schemas/HostUserId'
+        keys:
+          description: The current key version.
+          $ref: '#/components/schemas/PublicKeys'
+        kdf:
+          $ref: '#/components/schemas/KdfParams'
+        privateKeyBundle:
+          $ref: '#/components/schemas/Blob'
+        recoveryKeyBundle:
+          $ref: '#/components/schemas/Blob'
+        credentialsVersion:
+          type: integer
+          format: int32
+          minimum: 1
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+        updatedAt:
+          $ref: '#/components/schemas/Timestamp'
+    RegisterIdentityRequest:
+      type: object
+      required: [cryptoSuite, encryptionPublicKey, signingPublicKey, recoverySigningPublicKey, signature, kdf, privateKeyBundle, recoveryKeyBundle]
+      properties:
+        cryptoSuite:
+          $ref: '#/components/schemas/CryptoSuite'
+        encryptionPublicKey:
+          $ref: '#/components/schemas/Key32'
+        signingPublicKey:
+          $ref: '#/components/schemas/Key32'
+        recoverySigningPublicKey:
+          $ref: '#/components/schemas/Key32'
+        signature:
+          description: Signature of the version-1 key statement by the signing key.
+          $ref: '#/components/schemas/SignatureBlob'
+        kdf:
+          $ref: '#/components/schemas/KdfParams'
+        privateKeyBundle:
+          $ref: '#/components/schemas/Blob'
+        recoveryKeyBundle:
+          $ref: '#/components/schemas/Blob'
+    UpdateCredentialsRequest:
+      type: object
+      required: [expectedCredentialsVersion, kdf, privateKeyBundle, signature]
+      properties:
+        expectedCredentialsVersion:
+          type: integer
+          format: int32
+          minimum: 1
+        kdf:
+          $ref: '#/components/schemas/KdfParams'
+        privateKeyBundle:
+          $ref: '#/components/schemas/Blob'
+        signature:
+          description: |
+            `credentialsStatement` (`PROTOCOL.md` §5.4) for version `expectedCredentialsVersion + 1`,
+            signed with the caller's current signing key.
+          $ref: '#/components/schemas/SignatureBlob'
+    DeleteIdentityRequest:
+      type: object
+      required: [credentialsVersion, notAfter, signature]
+      properties:
+        credentialsVersion:
+          type: integer
+          format: int32
+          minimum: 1
+          description: The caller's current credentials version.
+        notAfter:
+          type: integer
+          format: int64
+          description: Unix time in seconds after which the statement is refused; at most 10 minutes ahead.
+        signature:
+          description: The identity deletion statement (`PROTOCOL.md` §5.7), signed with the current signing key.
+          $ref: '#/components/schemas/SignatureBlob'
+    LogEntryRequest:
+      type: object
+      required: [log]
+      properties:
+        log:
+          $ref: '#/components/schemas/LogEntryInput'
+    AcceptInviterRequest:
+      type: object
+      required: [inviterUserId]
+      properties:
+        inviterUserId:
+          $ref: '#/components/schemas/Uuid'
+    NodeKey:
+      type: string
+      minLength: 1
+      maxLength: 255
+      description: The application's key for a node, 1 to 255 bytes of UTF-8 (`PROTOCOL.md` §8.1).
+    ReplaceKeysRequest:
+      type: object
+      required: [expectedKeyVersion, encryptionPublicKey, signingPublicKey, recoverySigningPublicKey, signature, recoverySignature, kdf, privateKeyBundle, recoveryKeyBundle]
+      properties:
+        expectedKeyVersion:
+          description: The current key version, which the new one follows.
+          $ref: '#/components/schemas/IdentityKeyVersion'
+        encryptionPublicKey:
+          $ref: '#/components/schemas/Key32'
+        signingPublicKey:
+          $ref: '#/components/schemas/Key32'
+        recoverySigningPublicKey:
+          $ref: '#/components/schemas/Key32'
+        signature:
+          description: Signature of the new key statement by the new signing key.
+          $ref: '#/components/schemas/SignatureBlob'
+        recoverySignature:
+          description: Signature of the new key statement by the current version's recovery signing key.
+          $ref: '#/components/schemas/SignatureBlob'
+        kdf:
+          $ref: '#/components/schemas/KdfParams'
+        privateKeyBundle:
+          $ref: '#/components/schemas/Blob'
+        recoveryKeyBundle:
+          $ref: '#/components/schemas/Blob'
+    BatchGetUserKeysRequest:
+      type: object
+      required: [userIds]
+      properties:
+        userIds:
+          type: array
+          minItems: 1
+          maxItems: 100
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/Uuid'
+    BatchGetUserKeysResponse:
+      type: object
+      required: [items, missingUserIds]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/UserKeys'
+        missingUserIds:
+          type: array
+          items:
+            $ref: '#/components/schemas/Uuid'
+
+    # ----------------------------------------------------------------------------------------
+    # Vaults and their log
+    # ----------------------------------------------------------------------------------------
+    BatchGetVaultsRequest:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            type: object
+            required: [vaultId]
+            properties:
+              vaultId:
+                $ref: '#/components/schemas/Uuid'
+              afterSeq:
+                description: Log entries after this `seq`; omitted means from the first.
+                $ref: '#/components/schemas/LogSeq'
+    BatchGetVaultsResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required: [vaultId, found]
+            properties:
+              vaultId:
+                $ref: '#/components/schemas/Uuid'
+              found:
+                type: boolean
+                description: False when the caller cannot see the vault; then nothing else is set.
+              vault:
+                $ref: '#/components/schemas/Vault'
+              log:
+                $ref: '#/components/schemas/VaultLogPage'
+    BatchRotateVaultsRequest:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            allOf:
+              - $ref: '#/components/schemas/RotateVaultRequest'
+              - type: object
+                required: [vaultId]
+                properties:
+                  vaultId:
+                    $ref: '#/components/schemas/Uuid'
+    BatchRotateVaultsResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Vault'
+    WritePauseRequest:
+      type: object
+      required: [vaultIds]
+      properties:
+        vaultIds:
+          type: array
+          minItems: 1
+          maxItems: 100
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/Uuid'
+    WritePause:
+      type: object
+      required: [expiresAt]
+      properties:
+        expiresAt:
+          $ref: '#/components/schemas/Timestamp'
+    Vault:
+      type: object
+      description: |
+        A vault as the server describes it to a member. Clients trust none of it until it matches
+        the verified log: `role`, `keyVersion` and the head are claims.
+      required: [id, role, keyVersion, logSeq, logHeadHash, createdByUserId, createdAt, accepted, deleted]
+      properties:
+        id:
+          $ref: '#/components/schemas/Uuid'
+        accepted:
+          type: boolean
+          description: Whether the caller accepted the vault; unsigned, the server's help (`PROTOCOL.md` §12.4).
+        addedByUserId:
+          description: Who added the caller, from the log; absent for the vault's creator.
+          $ref: '#/components/schemas/Uuid'
+        deleted:
+          type: boolean
+          description: Whether the log ends in `vault_deleted`; the content is gone and only the log remains.
+        role:
+          $ref: '#/components/schemas/Role'
+        keyVersion:
+          $ref: '#/components/schemas/VaultKeyVersion'
+        keyEnvelope:
+          description: The caller's envelope of the current key; absent while it awaits delivery.
+          $ref: '#/components/schemas/Blob'
+        envelopeUserKeyVersion:
+          description: The caller's key version the envelope is sealed to.
+          $ref: '#/components/schemas/IdentityKeyVersion'
+        logSeq:
+          $ref: '#/components/schemas/LogSeq'
+        logHeadHash:
+          $ref: '#/components/schemas/Key32'
+        createdByUserId:
+          $ref: '#/components/schemas/Uuid'
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+    CreateVaultRequest:
+      type: object
+      required: [id, keyEnvelope, log]
+      properties:
+        id:
+          $ref: '#/components/schemas/Uuid'
+        keyEnvelope:
+          description: Key version 1 sealed to the caller's current keys.
+          $ref: '#/components/schemas/Blob'
+        log:
+          description: The signed `vault_created` entry.
+          $ref: '#/components/schemas/LogEntryInput'
+    VaultKey:
+      type: object
+      required: [version, createdAt]
+      properties:
+        version:
+          $ref: '#/components/schemas/VaultKeyVersion'
+        previousWrappedKey:
+          description: The previous version wrapped by this one; absent for version 1.
+          $ref: '#/components/schemas/Blob'
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+    VaultKeyList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/VaultKey'
+    LogEntryInput:
+      type: object
+      description: |
+        One signed log entry as a client sends it (`PROTOCOL.md` §7.1). The server fills in the
+        vault id, the previous hash and the author, rebuilds the message and checks the signature.
+      required: [seq, kind, keyVersion, requestEnd, authorKeyVersion, signature]
+      properties:
+        seq:
+          $ref: '#/components/schemas/LogSeq'
+        kind:
+          $ref: '#/components/schemas/LogEntryKind'
+        subjectUserId:
+          $ref: '#/components/schemas/Uuid'
+        role:
+          $ref: '#/components/schemas/Role'
+        keyVersion:
+          $ref: '#/components/schemas/VaultKeyVersion'
+        subjectKeys:
+          description: '`keysDigest` of the subject''s keys.'
+          $ref: '#/components/schemas/Key32'
+        subjectKeyVersion:
+          $ref: '#/components/schemas/IdentityKeyVersion'
+        keyCommitment:
+          $ref: '#/components/schemas/Key32'
+        checkpoint:
+          description: Merkle root over the latest write of every section of the vault.
+          $ref: '#/components/schemas/Key32'
+        requestEnd:
+          type: boolean
+          description: True on the last entry of the request.
+        authorKeyVersion:
+          $ref: '#/components/schemas/IdentityKeyVersion'
+        nodeId:
+          description: The node a node entry creates, shares or takes back.
+          $ref: '#/components/schemas/Uuid'
+        homeVaultId:
+          description: The home vault of the node `node_shared` shares.
+          $ref: '#/components/schemas/Uuid'
+        nodeKey:
+          $ref: '#/components/schemas/NodeKey'
+        sections:
+          description: '`*`, or section names in ascending byte order, comma-joined (`PROTOCOL.md` §7.1).'
+          type: string
+          minLength: 1
+          maxLength: 6500
+        signature:
+          $ref: '#/components/schemas/SignatureBlob'
+    LogEntry:
+      allOf:
+        - $ref: '#/components/schemas/LogEntryInput'
+        - type: object
+          required: [authorUserId, entryHash, createdAt]
+          properties:
+            authorUserId:
+              $ref: '#/components/schemas/Uuid'
+            entryHash:
+              description: SHA-256 of the signed message, which includes the previous entry's hash.
+              $ref: '#/components/schemas/Key32'
+            createdAt:
+              $ref: '#/components/schemas/Timestamp'
+    VaultLogPage:
+      type: object
+      required: [items, headSeq]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/LogEntry'
+        headSeq:
+          description: The log's last `seq`; read on while the last item is before it.
+          $ref: '#/components/schemas/LogSeq'
+    CheckpointLeaf:
+      type: object
+      required: [nodeId, sectionName, dataVersion, writeHash]
+      properties:
+        nodeId:
+          $ref: '#/components/schemas/Uuid'
+        sectionName:
+          $ref: '#/components/schemas/SectionName'
+        dataVersion:
+          $ref: '#/components/schemas/DataVersion'
+        writeHash:
+          $ref: '#/components/schemas/Key32'
+    LeftOutWrite:
+      type: object
+      description: A section's latest write that a checkpoint leaves out.
+      required: [nodeId, sectionName, writeHash]
+      properties:
+        nodeId:
+          $ref: '#/components/schemas/Uuid'
+        sectionName:
+          $ref: '#/components/schemas/SectionName'
+        writeHash:
+          $ref: '#/components/schemas/Key32'
+    LeafProof:
+      type: object
+      required: [index, leaf, path]
+      properties:
+        index:
+          type: integer
+          format: int64
+          minimum: 0
+        leaf:
+          $ref: '#/components/schemas/CheckpointLeaf'
+        path:
+          type: array
+          description: RFC 6962 audit path, leaf to root.
+          items:
+            $ref: '#/components/schemas/Key32'
+    CheckpointLeafPage:
+      allOf:
+        - $ref: '#/components/schemas/PageInfo'
+        - type: object
+          required: [checkpointSeq, size, leaves]
+          properties:
+            checkpointSeq:
+              $ref: '#/components/schemas/LogSeq'
+            size:
+              description: Number of leaves in the checkpoint.
+              type: integer
+              format: int32
+              minimum: 0
+            leaves:
+              type: array
+              items:
+                $ref: '#/components/schemas/CheckpointLeaf'
+    CheckpointProofQuery:
+      type: object
+      required: [checkpointSeq, nodeId, sectionName]
+      properties:
+        checkpointSeq:
+          $ref: '#/components/schemas/LogSeq'
+        nodeId:
+          $ref: '#/components/schemas/Uuid'
+        sectionName:
+          $ref: '#/components/schemas/SectionName'
+    BatchGetCheckpointProofsRequest:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          description: Up to `maxBatchSize` distinct queries.
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/CheckpointProofQuery'
+    BatchGetCheckpointProofsResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          description: One proof per query, in request order.
+          items:
+            $ref: '#/components/schemas/CheckpointProof'
+    CheckpointProof:
+      type: object
+      description: |
+        Either `inclusion`, the section's leaf, or `before` and `after`, the leaves around where it
+        would be (either absent at an edge), showing it is not in the checkpoint.
+      required: [checkpointSeq, size]
+      properties:
+        checkpointSeq:
+          $ref: '#/components/schemas/LogSeq'
+        size:
+          type: integer
+          format: int64
+          minimum: 0
+        inclusion:
+          $ref: '#/components/schemas/LeafProof'
+        before:
+          $ref: '#/components/schemas/LeafProof'
+        after:
+          $ref: '#/components/schemas/LeafProof'
+
+    # ----------------------------------------------------------------------------------------
+    # Members
+    # ----------------------------------------------------------------------------------------
+    AddMemberRequest:
+      type: object
+      required: [userId, role, keyVersion, userKeyVersion, keyEnvelope, log]
+      properties:
+        userId:
+          $ref: '#/components/schemas/Uuid'
+        role:
+          $ref: '#/components/schemas/Role'
+        keyVersion:
+          description: The vault's current key version, which the envelope holds.
+          $ref: '#/components/schemas/VaultKeyVersion'
+        userKeyVersion:
+          description: The member's key version the envelope is sealed to; the one `member_added` commits.
+          $ref: '#/components/schemas/IdentityKeyVersion'
+        keyEnvelope:
+          $ref: '#/components/schemas/Blob'
+        log:
+          $ref: '#/components/schemas/LogEntryInput'
+    SetMemberRoleRequest:
+      type: object
+      required: [role, log]
+      properties:
+        role:
+          $ref: '#/components/schemas/Role'
+        log:
+          $ref: '#/components/schemas/LogEntryInput'
+        leftOut:
+          type: array
+          maxItems: 10000
+          description: |
+            Latest writes the checkpoint leaves out (`PROTOCOL.md` §7.5); omitted when none. The
+            server checks the signed checkpoint against the stored latest writes minus these.
+          items:
+            $ref: '#/components/schemas/LeftOutWrite'
+    DeliverEnvelopeRequest:
+      type: object
+      required: [keyVersion, userKeyVersion, keyEnvelope]
+      properties:
+        keyVersion:
+          $ref: '#/components/schemas/VaultKeyVersion'
+        userKeyVersion:
+          $ref: '#/components/schemas/IdentityKeyVersion'
+        keyEnvelope:
+          $ref: '#/components/schemas/Blob'
+    LeaveVaultRequest:
+      type: object
+      required: [log]
+      properties:
+        log:
+          description: The signed `member_removed` with the caller as subject.
+          $ref: '#/components/schemas/LogEntryInput'
+        leftOut:
+          type: array
+          maxItems: 10000
+          description: |
+            Latest writes the checkpoint leaves out (`PROTOCOL.md` §7.5); omitted when none. The
+            server checks the signed checkpoint against the stored latest writes minus these.
+          items:
+            $ref: '#/components/schemas/LeftOutWrite'
+    MemberEnvelope:
+      type: object
+      required: [userId, userKeyVersion, keyEnvelope]
+      properties:
+        userId:
+          $ref: '#/components/schemas/Uuid'
+        userKeyVersion:
+          $ref: '#/components/schemas/IdentityKeyVersion'
+        keyEnvelope:
+          $ref: '#/components/schemas/Blob'
+    RotateVaultRequest:
+      type: object
+      required: [keyVersion, previousWrappedKey, envelopes, log]
+      properties:
+        keyVersion:
+          description: The new key version.
+          $ref: '#/components/schemas/VaultKeyVersion'
+        previousWrappedKey:
+          description: The current key wrapped by the new one.
+          $ref: '#/components/schemas/Blob'
+        envelopes:
+          type: array
+          maxItems: 1000
+          description: The new key for every remaining member whose key version is not superseded.
+          items:
+            $ref: '#/components/schemas/MemberEnvelope'
+        log:
+          type: array
+          minItems: 1
+          maxItems: 101
+          description: Zero or more `member_removed`, then `key_rotated`.
+          items:
+            $ref: '#/components/schemas/LogEntryInput'
+        leftOut:
+          type: array
+          maxItems: 10000
+          description: |
+            Latest writes the checkpoint leaves out (`PROTOCOL.md` §7.5); omitted when none. The
+            server checks the signed checkpoint against the stored latest writes minus these.
+          items:
+            $ref: '#/components/schemas/LeftOutWrite'
+    RecordKeyReplacementRequest:
+      type: object
+      required: [log]
+      properties:
+        log:
+          description: The signed `member_keys_replaced`.
+          $ref: '#/components/schemas/LogEntryInput'
+        keyEnvelope:
+          description: |
+            The current vault key sealed to the caller's new keys. Absent when the caller does not
+            hold the current key, because a rotation skipped their superseded keys; an admin then
+            delivers it.
+          $ref: '#/components/schemas/Blob'
+        leftOut:
+          type: array
+          maxItems: 10000
+          description: |
+            Latest writes the checkpoint leaves out (`PROTOCOL.md` §7.5); omitted when none. The
+            server checks the signed checkpoint against the stored latest writes minus these.
+          items:
+            $ref: '#/components/schemas/LeftOutWrite'
+
+    # ----------------------------------------------------------------------------------------
+    # Sections and nodes
+    # ----------------------------------------------------------------------------------------
+    SectionWriteInput:
+      type: object
+      description: One signed section write (`PROTOCOL.md` §8.2); the writer is the caller.
+      required: [nodeType, homeVaultId, ownerUserId, nodeKey, vaultKeyVersion, dataVersion, deleted, logSeq, logHeadHash, writerKeyVersion, signature]
+      properties:
+        nodeType:
+          $ref: '#/components/schemas/NodeType'
+        homeVaultId:
+          $ref: '#/components/schemas/Uuid'
+        ownerUserId:
+          $ref: '#/components/schemas/Uuid'
+        nodeKey:
+          $ref: '#/components/schemas/NodeKey'
+        vaultKeyVersion:
+          $ref: '#/components/schemas/VaultKeyVersion'
+        dataVersion:
+          $ref: '#/components/schemas/DataVersion'
+        deleted:
+          type: boolean
+        logSeq:
+          $ref: '#/components/schemas/LogSeq'
+        logHeadHash:
+          $ref: '#/components/schemas/Key32'
+        previousWriteHash:
+          description: The section's latest write; absent for the first write.
+          $ref: '#/components/schemas/Key32'
+        writerKeyVersion:
+          $ref: '#/components/schemas/IdentityKeyVersion'
+        ciphertext:
+          description: Absent for a deletion.
+          $ref: '#/components/schemas/Ciphertext'
+        signature:
+          $ref: '#/components/schemas/SignatureBlob'
+    SectionHeader:
+      type: object
+      description: |
+        A stored write without its ciphertext. `ciphertextHash` stands in for it: the signed
+        message carries that digest (`PROTOCOL.md` §8.2), so the header is enough to check the
+        signature and compute `writeHash`.
+      required: [vaultId, nodeId, sectionName, nodeType, homeVaultId, ownerUserId, nodeKey, vaultKeyVersion, dataVersion, deleted, logSeq, logHeadHash, writerUserId, writerKeyVersion, signature, writeHash, changeSeq, writtenAt]
+      properties:
+        vaultId:
+          $ref: '#/components/schemas/Uuid'
+        nodeId:
+          $ref: '#/components/schemas/Uuid'
+        sectionName:
+          $ref: '#/components/schemas/SectionName'
+        nodeType:
+          $ref: '#/components/schemas/NodeType'
+        homeVaultId:
+          $ref: '#/components/schemas/Uuid'
+        ownerUserId:
+          $ref: '#/components/schemas/Uuid'
+        nodeKey:
+          $ref: '#/components/schemas/NodeKey'
+        vaultKeyVersion:
+          $ref: '#/components/schemas/VaultKeyVersion'
+        dataVersion:
+          $ref: '#/components/schemas/DataVersion'
+        deleted:
+          type: boolean
+        logSeq:
+          $ref: '#/components/schemas/LogSeq'
+        logHeadHash:
+          $ref: '#/components/schemas/Key32'
+        previousWriteHash:
+          description: The section's previous write; absent for the first write.
+          $ref: '#/components/schemas/Key32'
+        writerUserId:
+          $ref: '#/components/schemas/Uuid'
+        writerKeyVersion:
+          $ref: '#/components/schemas/IdentityKeyVersion'
+        ciphertextHash:
+          description: SHA-256 of the ciphertext; absent for a deletion.
+          $ref: '#/components/schemas/Key32'
+        signature:
+          $ref: '#/components/schemas/SignatureBlob'
+        writeHash:
+          $ref: '#/components/schemas/Key32'
+        changeSeq:
+          $ref: '#/components/schemas/ChangeSeq'
+        writtenAt:
+          $ref: '#/components/schemas/Timestamp'
+    SectionWrite:
+      description: A stored write with its ciphertext.
+      allOf:
+        - $ref: '#/components/schemas/SectionHeader'
+        - type: object
+          properties:
+            ciphertext:
+              description: Absent for a deletion.
+              $ref: '#/components/schemas/Ciphertext'
+    SectionHeaderPage:
+      type: object
+      required: [items, removed, throughChangeSeq, lastChangeSeq]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/SectionHeader'
+        removed:
+          type: array
+          description: |
+            Sections the host removed in this page's range of changes (`PROTOCOL.md` §15). Unsigned:
+            a client only drops them from what it shows and keeps, as when the server hides a section.
+          items:
+            $ref: '#/components/schemas/SectionRemoval'
+        throughChangeSeq:
+          description: The last change number this page covers; pass it as the next `afterChange`.
+          type: integer
+          format: int64
+          minimum: 0
+        lastChangeSeq:
+          description: The vault's latest change number; read on while `throughChangeSeq` is before it.
+          type: integer
+          format: int64
+          minimum: 0
+    SectionRemoval:
+      type: object
+      required: [nodeId, sectionName, changeSeq]
+      properties:
+        nodeId:
+          $ref: '#/components/schemas/Uuid'
+        sectionName:
+          $ref: '#/components/schemas/SectionName'
+        changeSeq:
+          $ref: '#/components/schemas/ChangeSeq'
+    BatchWriteItem:
+      allOf:
+        - $ref: '#/components/schemas/SectionWriteInput'
+        - type: object
+          required: [vaultId, nodeId, sectionName]
+          properties:
+            vaultId:
+              $ref: '#/components/schemas/Uuid'
+            nodeId:
+              $ref: '#/components/schemas/Uuid'
+            sectionName:
+              $ref: '#/components/schemas/SectionName'
+    BatchWriteRequest:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/BatchWriteItem'
+    BatchWriteResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/SectionHeader'
+    SectionPage:
+      type: object
+      required: [items, removed, throughChangeSeq, lastChangeSeq]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/SectionWrite'
+        removed:
+          type: array
+          description: |
+            Sections the host removed in this page's range of changes (`PROTOCOL.md` §15). Unsigned:
+            a client only drops them from what it shows and keeps, as when the server hides a section.
+          items:
+            $ref: '#/components/schemas/SectionRemoval'
+        throughChangeSeq:
+          description: The last change number this page covers; pass it as the next `afterChange`.
+          type: integer
+          format: int64
+          minimum: 0
+        lastChangeSeq:
+          description: The vault's latest change number; read on while `throughChangeSeq` is before it.
+          type: integer
+          format: int64
+          minimum: 0
+    NodeSections:
+      type: object
+      required: [nodeId, sections]
+      properties:
+        nodeId:
+          $ref: '#/components/schemas/Uuid'
+        sections:
+          type: array
+          items:
+            $ref: '#/components/schemas/SectionWrite'
+    BatchGetNodesRequest:
+      type: object
+      required: [nodeIds]
+      properties:
+        nodeIds:
+          type: array
+          minItems: 1
+          maxItems: 100
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/Uuid'
+    BatchGetNodesResponse:
+      type: object
+      required: [items, missingNodeIds]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/NodeSections'
+        missingNodeIds:
+          type: array
+          items:
+            $ref: '#/components/schemas/Uuid'
+
+    # ----------------------------------------------------------------------------------------
+    # Pages
+    # ----------------------------------------------------------------------------------------
+    PageInfo:
+      type: object
+      properties:
+        nextCursor:
+          description: Cursor of the next page; absent on the last page.
+          $ref: '#/components/schemas/Cursor'
+    VaultPage:
+      allOf:
+        - $ref: '#/components/schemas/PageInfo'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/Vault'
+
+    # ----------------------------------------------------------------------------------------
+    # Errors
+    # ----------------------------------------------------------------------------------------
+    ErrorCode:
+      type: string
+      description: |
+        Stable machine-readable error code. Clients switch on this, never on `title` or `detail`.
+
+        | Code | Status | Meaning |
+        | --- | --- | --- |
+        | `validation_failed` | 400 | Body or parameters break the schema or a rule; see `errors` |
+        | `bad_signature` | 400 | A signature does not verify against the signer's key |
+        | `log_rejected` | 400 | A log entry breaks a rule of `PROTOCOL.md` §7; see `detail` |
+        | `unsupported_format` | 400 | Unknown blob format version or crypto suite |
+        | `deprecated_format` | 400 | Format version is read-only now; upgrade the client |
+        | `unauthenticated` | 401 | No valid host session |
+        | `role_required` | 403 | The caller's role is too weak; see `role` for the one needed |
+        | `not_found` | 404 | Missing, or not visible to the caller |
+        | `identity_required` | 404 | The caller, or the user to add, has no identity yet |
+        | `already_exists` | 409 | A resource with this id exists, or the user is already a member |
+        | `version_conflict` | 409 | `dataVersion` moved on; see `currentVersion` |
+        | `stale_head` | 409 | The vault log moved on since the head the write cites; see `currentVersion` |
+        | `vault_key_version_mismatch` | 409 | The vault key rotated; see `currentVersion` |
+        | `log_conflict` | 409 | The log moved on; see `currentVersion` for its head `seq` |
+        | `checkpoint_conflict` | 409 | The checkpoint does not match the stored latest writes; build it again |
+        | `recipients_mismatch` | 409 | A rotation must reseal to exactly the remaining members |
+        | `credentials_version_conflict` | 409 | Credentials changed on another device; see `currentVersion` |
+        | `identity_version_conflict` | 409 | Keys were replaced on another device; see `currentVersion` |
+        | `identity_in_vaults` | 409 | Delete or leave every vault before deleting the identity |
+        | `pause_held` | 409 | Someone else's write pause holds the vault |
+        | `too_many_invitations` | 409 | The person has too many vaults they have not accepted |
+        | `identity_deleted` | 410 | The caller, or the user the request names, is deleted |
+        | `payload_too_large` | 413 | Body or section larger than the limit |
+        | `rate_limited` | 429 | The host's request guard refused; see `Retry-After` |
+        | `busy` | 503 | The vault is busy, paused for a checkpoint, or the request ran out of time; see `Retry-After` |
+        | `internal_error` | 500 | Unexpected failure; see `traceId` |
+      enum:
+        - validation_failed
+        - bad_signature
+        - log_rejected
+        - unsupported_format
+        - deprecated_format
+        - unauthenticated
+        - role_required
+        - not_found
+        - identity_required
+        - already_exists
+        - version_conflict
+        - stale_head
+        - vault_key_version_mismatch
+        - log_conflict
+        - checkpoint_conflict
+        - recipients_mismatch
+        - credentials_version_conflict
+        - identity_version_conflict
+        - identity_in_vaults
+        - pause_held
+        - too_many_invitations
+        - identity_deleted
+        - payload_too_large
+        - rate_limited
+        - busy
+        - internal_error
+    FieldError:
+      type: object
+      required: [pointer, code, message]
+      properties:
+        pointer:
+          type: string
+          description: JSON Pointer (RFC 6901) into the request body, or `#/query/<name>` for a query parameter.
+          examples: [/log/role]
+        code:
+          type: string
+          description: Violated rule, such as `required`, `pattern`, `maxItems`, `format` or `max_members`.
+        message:
+          type: string
+          description: Human-readable explanation; not for display logic.
+    Problem:
+      type: object
+      description: RFC 9457 problem details, used for every error response.
+      required: [type, title, status, code]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: '`urn:cloak:problem:<code>`.'
+          examples: [urn:cloak:problem:version_conflict]
+        title:
+          type: string
+          description: Short summary; the same for every occurrence of a code.
+        status:
+          type: integer
+          format: int32
+          minimum: 400
+          maximum: 599
+        detail:
+          type: string
+          description: Explanation of this occurrence. Never contains secrets.
+        instance:
+          type: string
+          format: uri-reference
+          description: Path of the failing request.
+        code:
+          $ref: '#/components/schemas/ErrorCode'
+        traceId:
+          type: string
+          description: Correlation id for the server logs.
+        vaultId:
+          description: The vault a batch request was refused for.
+          $ref: '#/components/schemas/Uuid'
+        currentVersion:
+          type: integer
+          format: int64
+          description: |
+            Current version for `version_conflict`, `vault_key_version_mismatch`,
+            `credentials_version_conflict` and `identity_version_conflict`; head `seq` for
+            `log_conflict` and `stale_head`.
+        role:
+          $ref: '#/components/schemas/Role'
+        errors:
+          type: array
+          description: Field-level violations for `validation_failed`.
+          items:
+            $ref: '#/components/schemas/FieldError'
