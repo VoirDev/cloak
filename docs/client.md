@@ -27,13 +27,18 @@ const cloak = createCloakClient({
   storage: createIndexedDbStorage(),
 });
 
-// First time: show both codes once and ask the user to keep them.
+// First time or not: ask the server before asking for a password.
+const status = await cloak.identityStatus(); // "registered" | "none" | "deleted"
+// "deleted": the identity was deleted, and this host user can never register again.
+
+// First time ("none"): show both codes once and ask the user to keep them.
 const { session, secretKeyCode, recoveryKeyCode } = await cloak.register({
   userId: hostUserId, // the host's id of the signed-in user
   password,
 });
 
-// Later, on a new device: the code once, then the password alone if the device remembers it.
+// Later ("registered"), on a new device: the code once, then the password alone if the device
+// remembers it (`remembersSecretKey(hostUserId)` tells whether to ask for the code).
 const session = await cloak.unlock({
   password,
   secretKeyCode,

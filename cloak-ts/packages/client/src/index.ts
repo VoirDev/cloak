@@ -30,6 +30,7 @@ export {
   type CloakClient,
   type CloakClientOptions,
   type CredentialsResult,
+  type IdentityStatus,
   type KeyReplacementResult,
   type RememberSecretKeyOption,
 } from './client.ts';
