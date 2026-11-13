@@ -373,6 +373,22 @@ describe('a malicious server', () => {
     );
   });
 
+  it("cannot pass off another person's identity as the signed-in user's", async () => {
+    const alice = await victim();
+    const carol = await victim();
+    alice.hostile.rewrite = async (request, response) => {
+      if (request.method !== 'GET' || pathOf(request) !== '/identity') return undefined;
+      const identity = (await response.json()) as Schemas['Identity'];
+      return json({ ...identity, hostUserId: carol.userId });
+    };
+
+    const unexpected = { name: 'CloakApiError', code: 'unexpected_response' };
+    await expect(alice.client.identityStatus()).rejects.toMatchObject(unexpected);
+    await expect(
+      alice.client.unlock({ password: 'password', secretKeyCode: alice.secretKeyCode }),
+    ).rejects.toMatchObject(unexpected);
+  });
+
   it('cannot get a backdated write of a demoted editor accepted', async () => {
     const alice = await victim();
     const bob = await victim();

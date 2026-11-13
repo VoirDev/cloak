@@ -411,6 +411,19 @@ describe('the TypeScript client against the Kotlin server', () => {
     );
   });
 
+  it('tells before any password whether the user has no identity, has one, or had it erased', async () => {
+    const userId = crypto.randomUUID();
+    const client = clientFor(userId);
+    expect(await client.identityStatus()).toBe('none');
+
+    await client.register({ userId, password: 'correct horse' });
+    expect(await client.identityStatus()).toBe('registered');
+    expect(await clientFor(userId).identityStatus()).toBe('registered');
+
+    await erase(userId);
+    expect(await client.identityStatus()).toBe('deleted');
+  });
+
   it('the host erases a user: they can do nothing, nobody seals to them, and an admin removes them', async () => {
     const alice = await user();
     const carol = await user();

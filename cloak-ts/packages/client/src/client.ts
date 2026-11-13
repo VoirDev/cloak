@@ -29,7 +29,7 @@ import {
   type PublicKeys,
 } from '@voirdev/cloak-crypto';
 
-import { CloakApiError } from './CloakApiError.ts';
+import { CloakApiError, isCloakApiError } from './CloakApiError.ts';
 import { CloakKeyChangedError } from './CloakKeyChangedError.ts';
 import { CloakSecretKeyMissingError } from './CloakSecretKeyMissingError.ts';
 import { CloakUnlockError, type CloakUnlockErrorReason } from './CloakUnlockError.ts';
@@ -87,8 +87,29 @@ export interface KeyReplacementResult extends CredentialsResult {
   readonly unrecognizedEntries: Readonly<Record<string, readonly number[]>>;
 }
 
+/**
+ * What the server knows of the signed-in user's identity:
+ *
+ * - `registered`: it exists; {@link CloakClient.unlock} opens it;
+ * - `none`: the user never registered; {@link CloakClient.register} may follow;
+ * - `deleted`: it was deleted and left a tombstone; this host user id can never register again.
+ */
+export type IdentityStatus = 'registered' | 'none' | 'deleted';
+
 /** Entry point of a Cloak client. */
 export interface CloakClient {
+  /**
+   * Tells whether the signed-in user has an identity, before asking for any password, so an app
+   * knows whether to set the vault up ({@link register}) or unlock it ({@link unlock}). Needs no
+   * password or secret key and reads nothing from this device.
+   *
+   * @param options.signal Aborts the request; the promise then rejects with the `AbortError`.
+   * @throws {CloakApiError} as every request does (`unauthenticated`, `network_error`, a
+   *   `rate_limited` past the retries), and `unexpected_response` when the server names a host user
+   *   id the identity was not derived from (`PROTOCOL.md` §5.0).
+   */
+  identityStatus(options?: { readonly signal?: AbortSignal | undefined }): Promise<IdentityStatus>;
+
   /**
    * Registers the signed-in host user, named by the host's own id of them (`userId`), which the
    * server's authentication must give for the same request. Show both codes once and ask the user
@@ -202,8 +223,8 @@ export function createCloakClient(options: CloakClientOptions): CloakClient {
    * Reads the signed-in user's identity. The host user id the server names must derive the
    * identity's Cloak id (`PROTOCOL.md` §5.0).
    */
-  async function currentIdentity() {
-    const identity = await body(api.GET('/identity'));
+  async function currentIdentity(signal?: AbortSignal) {
+    const identity = await body(api.GET('/identity', signal === undefined ? {} : { signal }));
     const keys = fromWireKeys(identity.keys);
     if (!derives(identity.hostUserId, keys.userId)) throw new CloakApiError(0, undefined);
     return { identity, keys, hostUserId: identity.hostUserId };
@@ -312,6 +333,19 @@ export function createCloakClient(options: CloakClientOptions): CloakClient {
   }
 
   return {
+    async identityStatus({ signal } = {}) {
+      try {
+        await currentIdentity(signal);
+        return 'registered';
+      } catch (error: unknown) {
+        // By code, not status: a 404 that is not a Cloak problem, such as a wrong base URL, must
+        // not read as "never registered" and lead the user into setting up a second vault.
+        if (isCloakApiError(error, 'identity_required')) return 'none';
+        if (isCloakApiError(error, 'identity_deleted')) return 'deleted';
+        throw error;
+      }
+    },
+
     async register({ userId: hostUserId, password, rememberSecretKey }) {
       const identity = await createIdentity(cloakUserId(hostUserId), password, passwordHasher);
       await body(
