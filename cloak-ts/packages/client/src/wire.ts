@@ -99,6 +99,15 @@ const sectionWriteSchema = sectionHeaderSchema.extend({ ciphertext: base64.optio
 /** Runtime shape of a section the host removed. */
 const sectionRemovalSchema = z.object({ nodeId: uuid, sectionName, changeSeq: positive });
 
+/** Runtime shape of a section's address. */
+const sectionRefSchema = z.object({ vaultId: uuid, nodeId: uuid, sectionName });
+
+/** Runtime shape of a batch read of latest write headers. */
+const latestHeadersSchema = z.object({
+  items: z.array(sectionHeaderSchema),
+  missing: z.array(sectionRefSchema),
+});
+
 /** The change range every feed page states. */
 const feedRange = {
   removed: z.array(sectionRemovalSchema),
@@ -229,6 +238,16 @@ export function validWrite(value: unknown): Schemas['SectionWrite'] {
  */
 export function validHeader(value: unknown): Schemas['SectionHeader'] {
   return validated(sectionHeaderSchema, value);
+}
+
+/**
+ * Validates a batch read of latest write headers.
+ *
+ * @param value Value from the server.
+ * @returns The headers found and the sections listed as missing.
+ */
+export function validLatestHeaders(value: unknown): Schemas['BatchGetSectionHeadersResponse'] {
+  return validated(latestHeadersSchema, value);
 }
 
 /**

@@ -13,13 +13,16 @@ import dev.voir.cloak.server.section.domain.SectionWriteInput
 import dev.voir.cloak.server.vault.domain.CheckpointLeaf
 import dev.voir.cloak.server.vault.domain.VaultId
 import dev.voir.cloak.server.vault.persistence.VaultMembersTable
+import dev.voir.cloak.server.vault.persistence.VaultsTable
 import org.jetbrains.exposed.v1.core.JoinType
 import org.jetbrains.exposed.v1.core.ResultRow
 import org.jetbrains.exposed.v1.core.SortOrder
 import org.jetbrains.exposed.v1.core.and
+import org.jetbrains.exposed.v1.core.compoundOr
 import org.jetbrains.exposed.v1.core.eq
 import org.jetbrains.exposed.v1.core.greater
 import org.jetbrains.exposed.v1.core.inList
+import org.jetbrains.exposed.v1.core.isNull
 import org.jetbrains.exposed.v1.jdbc.select
 import org.jetbrains.exposed.v1.jdbc.selectAll
 import org.jetbrains.exposed.v1.jdbc.upsert
@@ -122,28 +125,38 @@ internal object SectionRepository {
             .where { (SectionsTable.vaultId eq vaultId.value) and (SectionsTable.changeSeq greater afterChange) }
             .orderBy(SectionsTable.changeSeq to SortOrder.ASC)
             .limit(limit)
-            .map { row ->
-                SectionHeader(
-                    section = row.toRef(),
-                    nodeType = NodeType(row[SectionsTable.nodeType]),
-                    homeVaultId = VaultId(row[SectionsTable.homeVaultId]),
-                    ownerUserId = UserId(row[SectionsTable.ownerUserId]),
-                    nodeKey = row[SectionsTable.nodeKey],
-                    vaultKeyVersion = row[SectionsTable.vaultKeyVersion],
-                    dataVersion = row[SectionsTable.dataVersion],
-                    deleted = row[SectionsTable.deleted],
-                    logSeq = row[SectionsTable.logSeq],
-                    logHeadHash = row[SectionsTable.logHeadHash].toByteString(),
-                    previousWriteHash = row[SectionsTable.previousWriteHash]?.toByteString(),
-                    writerUserId = UserId(row[SectionsTable.writerUserId]),
-                    writerKeyVersion = row[SectionsTable.writerKeyVersion],
-                    ciphertextHash = row[SectionsTable.ciphertextHash]?.toByteString(),
-                    signature = row[SectionsTable.signature].toByteString(),
-                    writeHash = row[SectionsTable.writeHash].toByteString(),
-                    changeSeq = row[SectionsTable.changeSeq],
-                    writtenAt = row[SectionsTable.writtenAt],
-                )
+            .map { it.toHeader() }
+
+    /**
+     * Loads the latest write headers of sections in live vaults a user belongs to, in one query,
+     * without reading the ciphertext.
+     *
+     * @param sections Sections.
+     * @param userId Reader.
+     * @return Headers of the sections found, by section.
+     */
+    fun readableHeaders(sections: Collection<SectionRef>, userId: UserId): Map<SectionRef, SectionHeader> {
+        if (sections.isEmpty()) return emptyMap()
+        return SectionsTable
+            .join(
+                VaultMembersTable,
+                JoinType.INNER,
+                additionalConstraint = {
+                    (VaultMembersTable.vaultId eq SectionsTable.vaultId) and (VaultMembersTable.userId eq userId.value)
+                },
+            )
+            .join(VaultsTable, JoinType.INNER, additionalConstraint = { VaultsTable.id eq SectionsTable.vaultId })
+            .select(SectionsTable.columns - SectionsTable.ciphertext)
+            .where {
+                VaultsTable.deletedAt.isNull() and sections.map { ref ->
+                    (SectionsTable.vaultId eq ref.vaultId.value) and
+                        (SectionsTable.nodeId eq ref.nodeId.value) and
+                        (SectionsTable.sectionName eq ref.sectionName.value)
+                }.compoundOr()
             }
+            .map { it.toHeader() }
+            .associateBy { it.section }
+    }
 
     /**
      * Lists the sections the host removed from a vault, by change number.
@@ -196,6 +209,29 @@ internal object SectionRepository {
             vaultId = VaultId(this[SectionsTable.vaultId]),
             nodeId = NodeId(this[SectionsTable.nodeId]),
             sectionName = SectionName(this[SectionsTable.sectionName]),
+        )
+
+    /** Maps a row read without its ciphertext. */
+    private fun ResultRow.toHeader(): SectionHeader =
+        SectionHeader(
+            section = toRef(),
+            nodeType = NodeType(this[SectionsTable.nodeType]),
+            homeVaultId = VaultId(this[SectionsTable.homeVaultId]),
+            ownerUserId = UserId(this[SectionsTable.ownerUserId]),
+            nodeKey = this[SectionsTable.nodeKey],
+            vaultKeyVersion = this[SectionsTable.vaultKeyVersion],
+            dataVersion = this[SectionsTable.dataVersion],
+            deleted = this[SectionsTable.deleted],
+            logSeq = this[SectionsTable.logSeq],
+            logHeadHash = this[SectionsTable.logHeadHash].toByteString(),
+            previousWriteHash = this[SectionsTable.previousWriteHash]?.toByteString(),
+            writerUserId = UserId(this[SectionsTable.writerUserId]),
+            writerKeyVersion = this[SectionsTable.writerKeyVersion],
+            ciphertextHash = this[SectionsTable.ciphertextHash]?.toByteString(),
+            signature = this[SectionsTable.signature].toByteString(),
+            writeHash = this[SectionsTable.writeHash].toByteString(),
+            changeSeq = this[SectionsTable.changeSeq],
+            writtenAt = this[SectionsTable.writtenAt],
         )
 
     /** Maps a row. */

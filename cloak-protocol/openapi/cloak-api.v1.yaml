@@ -1427,6 +1427,45 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /section-headers/batch-get:
+    post:
+      tags: [Sections]
+      operationId: batchGetSectionHeaders
+      summary: Get the latest write headers of several sections
+      description: |
+        The latest write of each named section, without its ciphertext, as `listVaultSectionHeaders`
+        gives it: what a writer reads before chaining its writes (`PROTOCOL.md` §8.3). Up to
+        `maxBatchSize` distinct sections, in any vaults. A section that was never written, or that
+        lives in a vault the caller is not a member of or that was deleted, is listed in `missing`
+        instead: the answer tells them apart no more than `getSection` does.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchGetSectionHeadersRequest'
+      responses:
+        '200':
+          description: The headers of the sections found, in request order, and the others.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchGetSectionHeadersResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   # ------------------------------------------------------------------------------------------
   # Nodes
   # ------------------------------------------------------------------------------------------
@@ -2805,6 +2844,42 @@ components:
           type: integer
           format: int64
           minimum: 0
+    SectionRef:
+      type: object
+      description: A section by its vault, node and name.
+      required: [vaultId, nodeId, sectionName]
+      properties:
+        vaultId:
+          $ref: '#/components/schemas/Uuid'
+        nodeId:
+          $ref: '#/components/schemas/Uuid'
+        sectionName:
+          $ref: '#/components/schemas/SectionName'
+    BatchGetSectionHeadersRequest:
+      type: object
+      required: [sections]
+      properties:
+        sections:
+          type: array
+          description: Distinct sections.
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/SectionRef'
+    BatchGetSectionHeadersResponse:
+      type: object
+      required: [items, missing]
+      properties:
+        items:
+          type: array
+          description: The latest write of each section found, in request order.
+          items:
+            $ref: '#/components/schemas/SectionHeader'
+        missing:
+          type: array
+          description: The requested sections without a latest write the caller can read, in request order.
+          items:
+            $ref: '#/components/schemas/SectionRef'
     NodeSections:
       type: object
       required: [nodeId, sections]

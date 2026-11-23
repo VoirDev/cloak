@@ -2,6 +2,7 @@ package dev.voir.cloak.spring.web.mapping
 
 import dev.voir.cloak.api.models.BatchGetCheckpointProofsResponse
 import dev.voir.cloak.api.models.BatchGetNodesResponse
+import dev.voir.cloak.api.models.BatchGetSectionHeadersResponse
 import dev.voir.cloak.api.models.BatchGetUserKeysResponse
 import dev.voir.cloak.api.models.LimitsKdf
 import dev.voir.cloak.api.models.MetaBlobFormats
@@ -19,6 +20,8 @@ import dev.voir.cloak.server.section.domain.NodeSections
 import dev.voir.cloak.server.section.domain.NodeSectionsBatch
 import dev.voir.cloak.server.section.domain.SectionHeader
 import dev.voir.cloak.server.section.domain.SectionHeaderPage
+import dev.voir.cloak.server.section.domain.SectionHeadersBatch
+import dev.voir.cloak.server.section.domain.SectionRef
 import dev.voir.cloak.server.section.domain.SectionPage
 import dev.voir.cloak.server.section.domain.SectionRemoval
 import dev.voir.cloak.server.section.domain.SectionWrite
@@ -45,6 +48,7 @@ import dev.voir.cloak.api.models.NodeSections as ApiNodeSections
 import dev.voir.cloak.api.models.PublicKeys as ApiPublicKeys
 import dev.voir.cloak.api.models.SectionHeader as ApiSectionHeader
 import dev.voir.cloak.api.models.SectionHeaderPage as ApiSectionHeaderPage
+import dev.voir.cloak.api.models.SectionRef as ApiSectionRef
 import dev.voir.cloak.api.models.SectionPage as ApiSectionPage
 import dev.voir.cloak.api.models.SectionRemoval as ApiSectionRemoval
 import dev.voir.cloak.api.models.BatchGetVaultsResponse as ApiBatchGetVaultsResponse
@@ -219,6 +223,13 @@ internal fun SectionHeader.toApi(): ApiSectionHeader =
         changeSeq = changeSeq,
         writtenAt = Wire.instant(writtenAt),
     )
+
+/** Maps a batch read of section headers. */
+internal fun SectionHeadersBatch.toApi(): BatchGetSectionHeadersResponse =
+    BatchGetSectionHeadersResponse(items.map { it.toApi() }, missing.map { it.toApi() })
+
+/** Maps a section. */
+internal fun SectionRef.toApi(): ApiSectionRef = ApiSectionRef(Wire.uuid(vaultId.value), Wire.uuid(nodeId.value), sectionName.value)
 
 /** Maps a page of a vault's section headers. */
 internal fun SectionHeaderPage.toApi(): ApiSectionHeaderPage =

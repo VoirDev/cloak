@@ -80,6 +80,7 @@ import {
   validHeader,
   isFeedRangeSound,
   validHeaderPage,
+  validLatestHeaders,
   validSectionPage,
   validWrite,
 } from './wire.ts';
@@ -307,7 +308,8 @@ export interface CloakSession {
   deleteAccount(): Promise<void>;
 
   /**
-   * Writes up to 100 sections in any of the user's vaults, together or not at all. The request
+   * Writes up to 100 sections in any of the user's vaults, together or not at all, in two
+   * requests: one reads the latest write headers of every section, the other writes. The write
    * must fit the server's `maxRequestBytes` (`GET /meta`); a larger one fails with
    * `payload_too_large`, and nothing is written.
    */
@@ -381,6 +383,23 @@ interface CheckpointDraft {
   lastChange: number;
   /** The latest write of each section with its standing, by section. */
   readonly writes: Map<string, { readonly served: ServedHeader; readonly standing: Standing }>;
+}
+
+/** A change checked against its vault's verified log, ready to chain and sign. */
+interface Placed {
+  /** The change. */
+  readonly change: SectionChange;
+  /** Its vault, verified to the server's head for this write. */
+  readonly record: VaultRecord;
+  /** Its node's owner, home and key. */
+  readonly origin: NodeOrigin;
+  /** Its node. */
+  readonly nodeId: string;
+}
+
+/** One section's address, as a key. */
+function sectionAddress(ref: Schemas['SectionRef']): string {
+  return `${ref.vaultId}/${ref.nodeId}/${ref.sectionName}`;
 }
 
 /**
@@ -551,7 +570,7 @@ export function createSession(context: SessionContext): CloakSession {
     const seen = new Set<string>();
     for (const write of writes) {
       const valid = validHeader(write);
-      const address = `${valid.vaultId}/${valid.nodeId}/${valid.sectionName}`;
+      const address = sectionAddress(valid);
       if (
         (place.vaultId !== undefined && valid.vaultId !== place.vaultId) ||
         (place.nodeId !== undefined && valid.nodeId !== place.nodeId) ||
@@ -1169,38 +1188,71 @@ export function createSession(context: SessionContext): CloakSession {
     return verified;
   }
 
-  /** Signs one write of [change] against fresh state. */
-  async function prepare(
-    change: SectionChange,
-    fresh: Map<string, VaultRecord>,
-  ): Promise<{ readonly wire: Schemas['SectionWriteInput']; readonly fields: SectionWriteFields }> {
+  /**
+   * Checks where [change] goes against its vault's freshly verified log: rule 6 before anything is
+   * encrypted or even asked about, so content goes only where the owner put the node, whatever the
+   * application or the server says (§8.3). A deletion carries nothing to read.
+   */
+  async function place(change: SectionChange, fresh: Map<string, VaultRecord>): Promise<Placed> {
     const record = fresh.get(change.vaultId) ?? (await book.verify(change.vaultId));
     fresh.set(change.vaultId, record);
-    const head = logHead(record.state);
     const origin = originOf(change.node);
     const nodeId = nodeIdOf(origin);
-    const deleted = change.content === undefined;
-    // Rule 6 before anything is encrypted: content goes only where the owner put the node, whatever
-    // the application or the server says (§8.3). A deletion carries nothing to read.
-    if (!deleted && !livesIn(record.state, change.vaultId, nodeId, origin, change.name)) {
+    if (
+      change.content !== undefined &&
+      !livesIn(record.state, change.vaultId, nodeId, origin, change.name)
+    ) {
       throw new CloakSectionError(change.vaultId, nodeId, change.name, 'not_shared');
     }
-    const latest = await body(
-      api.GET('/vaults/{vaultId}/sections/{nodeId}/{sectionName}', {
-        params: {
-          path: { vaultId: change.vaultId, nodeId, sectionName: change.name },
-        },
-      }),
-    ).catch((error: unknown) => {
-      if (isCloakApiError(error, 'not_found')) return undefined;
-      throw error;
-    });
-    if (latest !== undefined)
-      requirePlace(change.vaultId, [latest], {
-        vaultId: change.vaultId,
-        nodeId,
-        sectionName: change.name,
-      });
+    return { change, record, origin, nodeId };
+  }
+
+  /**
+   * The latest write of each placed change's section, from one request (§8.3); `undefined` for a
+   * section the server lists as missing. The server must answer for every section asked, once, and
+   * for no other: it could otherwise give a write the chain of another section.
+   */
+  async function latestWrites(
+    placed: readonly Placed[],
+  ): Promise<Map<string, Schemas['SectionHeader'] | undefined>> {
+    const asked = new Map<string, Schemas['SectionRef']>();
+    for (const { change, nodeId } of placed) {
+      const ref = { vaultId: change.vaultId, nodeId, sectionName: change.name };
+      asked.set(sectionAddress(ref), ref);
+    }
+    const answer = validLatestHeaders(
+      await body(
+        api.POST('/section-headers/batch-get', { body: { sections: [...asked.values()] } }),
+      ),
+    );
+    const latest = new Map<string, Schemas['SectionHeader'] | undefined>();
+    const answered: [Schemas['SectionRef'], Schemas['SectionHeader'] | undefined][] = [
+      ...answer.items.map((header): [Schemas['SectionRef'], Schemas['SectionHeader']] => [
+        header,
+        header,
+      ]),
+      ...answer.missing.map((ref): [Schemas['SectionRef'], undefined] => [ref, undefined]),
+    ];
+    for (const [ref, header] of answered) {
+      const address = sectionAddress(ref);
+      if (!asked.has(address) || latest.has(address))
+        throw new CloakVaultLogError(ref.vaultId, 'state_mismatch');
+      latest.set(address, header);
+    }
+    for (const ref of asked.values()) {
+      if (!latest.has(sectionAddress(ref)))
+        throw new CloakVaultLogError(ref.vaultId, 'state_mismatch');
+    }
+    return latest;
+  }
+
+  /** Signs one write of a placed change, chained to its section's [latest] write. */
+  async function prepare(
+    { change, record, origin, nodeId }: Placed,
+    latest: Schemas['SectionHeader'] | undefined,
+  ): Promise<{ readonly wire: Schemas['SectionWriteInput']; readonly fields: SectionWriteFields }> {
+    const head = logHead(record.state);
+    const deleted = change.content === undefined;
     // Never chain onto a write older than one this device saw, or another of the same version.
     const mark = await local.mark({ vaultId: change.vaultId, nodeId, sectionName: change.name });
     if (mark !== undefined) {
@@ -1292,8 +1344,15 @@ export function createSession(context: SessionContext): CloakSession {
   async function writeAll(changes: readonly SectionChange[]): Promise<readonly SectionInfo[]> {
     return retrying([...new Set(changes.map((change) => change.vaultId))], async () => {
       const fresh = new Map<string, VaultRecord>();
+      const placed = [];
+      for (const change of changes) placed.push(await place(change, fresh));
+      const latest = await latestWrites(placed);
       const prepared = [];
-      for (const change of changes) prepared.push(await prepare(change, fresh));
+      for (const item of placed) {
+        const { change, nodeId } = item;
+        const ref = { vaultId: change.vaultId, nodeId, sectionName: change.name };
+        prepared.push(await prepare(item, latest.get(sectionAddress(ref))));
+      }
       const [single] = prepared;
       if (prepared.length === 1 && single !== undefined) {
         const { fields } = single;

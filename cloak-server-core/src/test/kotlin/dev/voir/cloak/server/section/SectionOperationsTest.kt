@@ -129,6 +129,39 @@ class SectionOperationsTest {
     }
 
     @Test
+    fun `batch headers give the latest writes found and list the others as missing, in request order`() {
+        val other = cloak.createVault(alice)
+        val elsewhere = cloak.node(alice, other)
+        cloak.addMember(alice, vault, bob, Role.EDITOR)
+        cloak.write(alice, vault, node, "general")
+        cloak.write(alice, vault, node, "general", deleted = true)
+        cloak.write(alice, other, elsewhere, "general")
+        val deleted = SectionRef(vault, node, SectionName("general"))
+        val unwritten = SectionRef(vault, node, SectionName("secrets"))
+        val foreign = SectionRef(other, elsewhere, SectionName("general"))
+        val unknownVault = SectionRef(cloak.createVault(bob), node, SectionName("general"))
+
+        val forAlice = cloak.server.sections.headers(alice.id, listOf(unwritten, foreign, deleted))
+        val forBob = cloak.server.sections.headers(bob.id, listOf(foreign, deleted, unknownVault, unwritten))
+
+        val latest = listOf(foreign, deleted).map { cloak.server.sections.get(alice.id, it).header }
+        assertEquals(latest, forAlice.items)
+        assertEquals(listOf(unwritten), forAlice.missing)
+        assertTrue(forAlice.items[1].deleted)
+        assertEquals(listOf(latest[1]), forBob.items)
+        assertEquals(listOf(foreign, unknownVault, unwritten), forBob.missing)
+    }
+
+    @Test
+    fun `batch headers refuse an empty, oversized or repeated list`() {
+        val refs = (0..Limits.MAX_BATCH_SIZE).map { SectionRef(vault, node, SectionName("s$it")) }
+        assertCloakError(CloakErrorCode.VALIDATION_FAILED) { cloak.server.sections.headers(alice.id, emptyList()) }
+        assertCloakError(CloakErrorCode.VALIDATION_FAILED) { cloak.server.sections.headers(alice.id, refs) }
+        assertCloakError(CloakErrorCode.VALIDATION_FAILED) { cloak.server.sections.headers(alice.id, listOf(refs[0], refs[1], refs[0])) }
+        assertEquals(Limits.MAX_BATCH_SIZE, cloak.server.sections.headers(alice.id, refs.drop(1)).missing.size)
+    }
+
+    @Test
     fun `a vault refuses a new section past its limit, but its sections can still change`() {
         cloak.write(alice, vault, node, "general")
         cloak.sql(
