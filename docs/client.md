@@ -148,6 +148,14 @@ its owner leaves the vault or is removed. Moving a record to another home is a n
 there, write its sections, delete the old ones. `SectionInfo.node` tells which node, and so which
 owner, each section belongs to, and `writerUserId` who wrote it.
 
+`writeSections(changes)` writes up to 100 sections in any of the user's vaults, together or not at
+all, in two requests: one reads the latest write of every section as headers, the other writes.
+A section that was never written comes back from the first as missing, as data rather than an HTTP
+error. `writeSection` and `deleteSection` take the same two requests. A section this device saw
+that the server calls missing or older fails the write with `rollback`, and another write of the
+version it saw with `fork`. Content goes only where its node lives (`PROTOCOL.md` §8.3, rule 6):
+anything else fails with `not_shared` before the server hears of the section.
+
 ## Invitations
 
 A person an admin adds to a vault is a member by the log at once, but the vault is **pending** for

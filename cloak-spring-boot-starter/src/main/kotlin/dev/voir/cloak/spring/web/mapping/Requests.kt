@@ -2,6 +2,7 @@ package dev.voir.cloak.spring.web.mapping
 
 import dev.voir.cloak.api.models.AddMemberRequest
 import dev.voir.cloak.api.models.BatchGetCheckpointProofsRequest
+import dev.voir.cloak.api.models.BatchGetSectionHeadersRequest
 import dev.voir.cloak.api.models.BatchGetVaultsRequest
 import dev.voir.cloak.api.models.BatchRotateVaultsRequest
 import dev.voir.cloak.api.models.BatchWriteRequest
@@ -45,6 +46,7 @@ import dev.voir.cloak.api.models.KdfParams as ApiKdfParams
 import dev.voir.cloak.api.models.LeftOutWrite as ApiLeftOutWrite
 import dev.voir.cloak.api.models.LogEntryInput as ApiLogEntryInput
 import dev.voir.cloak.api.models.MemberEnvelope as ApiMemberEnvelope
+import dev.voir.cloak.api.models.SectionRef as ApiSectionRef
 import dev.voir.cloak.api.models.SectionWriteInput as ApiSectionWriteInput
 
 // Generated request models to core commands. Jackson already enforced required fields, JSON
@@ -217,6 +219,14 @@ internal fun ApiSectionWriteInput.toCore(pointer: String = ""): SectionWriteInpu
         ownerUserId = UserId(Wire.uuid(ownerUserId)),
         nodeKey = nodeKey,
     )
+
+/** Maps a batch read of section headers. */
+internal fun BatchGetSectionHeadersRequest.toCore(): List<SectionRef> =
+    sections.mapIndexed { index, section -> section.toCore("/sections/$index") }
+
+/** Maps a section at [pointer]. */
+private fun ApiSectionRef.toCore(pointer: String): SectionRef =
+    SectionRef(VaultId(Wire.uuid(vaultId)), NodeId(Wire.uuid(nodeId)), Wire.sectionName(sectionName, "$pointer/sectionName"))
 
 /** Maps one batch item at [pointer]. */
 private fun ApiBatchWriteItem.toCore(pointer: String): BatchWriteItem =

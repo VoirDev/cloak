@@ -154,6 +154,46 @@ describe('the client on large vaults', () => {
     expect(count(reader, 'GET', /\/checkpoints\/\d+\/leaves$/)).toBe(0);
   });
 
+  it('chains a batch of writes with one lookup, never a read per section', async () => {
+    const alice = await counted();
+    const vault = await alice.session.createVault();
+    const node = await alice.session.createNode(vault.id, crypto.randomUUID());
+    const lookups = () => count(alice, 'POST', /^\/section-headers\/batch-get$/);
+    const reads = () => count(alice, 'GET', /^\/vaults\/[^/]+\/sections\/[^/]+\/[^/]+$/);
+
+    // First writes, then writes over them: either way one lookup and one write per batch.
+    for (const round of [1, 2]) {
+      alice.sent.length = 0;
+      const written = await alice.session.writeSections(
+        Array.from({ length: 100 }, (_, index) => ({
+          vaultId: vault.id,
+          node,
+          name: `field_${String(index)}`,
+          type: 'server',
+          content: { round },
+        })),
+      );
+      expect(written.map((info) => info.dataVersion)).toEqual(Array(100).fill(round));
+      expect(lookups()).toBe(1);
+      expect(count(alice, 'POST', /^\/sections\/batch-write$/)).toBe(1);
+      expect(reads()).toBe(0);
+    }
+
+    alice.sent.length = 0;
+    await alice.session.writeSection(vault.id, node, 'single', { type: 'server', content: 1 });
+    expect(lookups()).toBe(1);
+    expect(count(alice, 'PUT', /^\/vaults\/[^/]+\/sections\//)).toBe(1);
+    expect(reads()).toBe(0);
+
+    // Rule 6 comes first: a section the node does not live in is never even asked about.
+    const other = await alice.session.createVault();
+    alice.sent.length = 0;
+    await expect(
+      alice.session.writeSection(other.id, node, 'general', { type: 'server', content: 1 }),
+    ).rejects.toMatchObject({ reason: 'not_shared' });
+    expect(lookups()).toBe(0);
+  });
+
   it('continues a later session from the snapshot this device kept', async () => {
     const alice = await counted();
     const bob = await counted();

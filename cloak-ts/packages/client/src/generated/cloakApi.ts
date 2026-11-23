@@ -693,6 +693,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/section-headers/batch-get": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Get the latest write headers of several sections
+         * @description The latest write of each named section, without its ciphertext, as `listVaultSectionHeaders`
+         *     gives it: what a writer reads before chaining its writes (`PROTOCOL.md` §8.3). Up to
+         *     `maxBatchSize` distinct sections, in any vaults. A section that was never written, or that
+         *     lives in a vault the caller is not a member of or that was deleted, is listed in `missing`
+         *     instead: the answer tells them apart no more than `getSection` does.
+         */
+        post: operations["batchGetSectionHeaders"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/nodes/{nodeId}": {
         parameters: {
             query?: never;
@@ -1380,6 +1404,22 @@ export interface components {
              * @description The vault's latest change number; read on while `throughChangeSeq` is before it.
              */
             lastChangeSeq: number;
+        };
+        /** @description A section by its vault, node and name. */
+        SectionRef: {
+            vaultId: components["schemas"]["Uuid"];
+            nodeId: components["schemas"]["Uuid"];
+            sectionName: components["schemas"]["SectionName"];
+        };
+        BatchGetSectionHeadersRequest: {
+            /** @description Distinct sections. */
+            sections: components["schemas"]["SectionRef"][];
+        };
+        BatchGetSectionHeadersResponse: {
+            /** @description The latest write of each section found, in request order. */
+            items: components["schemas"]["SectionHeader"][];
+            /** @description The requested sections without a latest write the caller can read, in request order. */
+            missing: components["schemas"]["SectionRef"][];
         };
         NodeSections: {
             nodeId: components["schemas"]["Uuid"];
@@ -2839,6 +2879,37 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            410: components["responses"]["Gone"];
+            413: components["responses"]["PayloadTooLarge"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    batchGetSectionHeaders: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BatchGetSectionHeadersRequest"];
+            };
+        };
+        responses: {
+            /** @description The headers of the sections found, in request order, and the others. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BatchGetSectionHeadersResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             410: components["responses"]["Gone"];
             413: components["responses"]["PayloadTooLarge"];
             429: components["responses"]["TooManyRequests"];

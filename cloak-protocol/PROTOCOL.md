@@ -804,7 +804,10 @@ Create a node with a signed `node_created` in its home vault (`POST /vaults/{id}
 write with `dataVersion` 1. Writes, deletions and moves follow §8.3, one at a time
 (`PUT /vaults/{id}/sections/{nodeId}/{name}`) or up to 100 at once in any of one's vaults
 (`POST /sections/batch-write`), applied together or not at all. A move is a deletion in one vault
-and a first write in another where the node lives, in one batch. A client keeps
+and a first write in another where the node lives, in one batch. The latest writes a batch chains
+to (§8.3) come as headers from `POST /section-headers/batch-get`, up to 100 sections in any of
+one's vaults; a section without a write the caller can read is listed as missing, as data, and the
+writer judges that answer against its marks (§15) exactly as a single read. A client keeps
 a vault's replica current with `GET /vaults/{id}/sections?afterChange=…`, which returns every
 section whose latest write is newer, deletions included. `GET /vaults/{id}/section-headers` lists
 the same writes as headers (§8.2), in larger pages, for checking standing without the content.

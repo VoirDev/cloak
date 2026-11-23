@@ -18,6 +18,7 @@ import dev.voir.cloak.server.protocol.sha256
 import dev.voir.cloak.server.protocol.isAbsent
 import dev.voir.cloak.server.section.domain.BatchWriteItem
 import dev.voir.cloak.server.section.domain.SectionHeaderPage
+import dev.voir.cloak.server.section.domain.SectionHeadersBatch
 import dev.voir.cloak.server.section.domain.SectionPage
 import dev.voir.cloak.server.section.domain.SectionRef
 import dev.voir.cloak.server.section.domain.SectionRemoval
@@ -141,6 +142,28 @@ public class SectionOperations internal constructor(
             val removals = SectionRepository.removalsByChange(vaultId, after, limit)
             val through = throughChange(vault.changeSeq, limit, headers.map { it.changeSeq }, removals)
             SectionHeaderPage(headers.filter { it.changeSeq <= through }, removals.filter { it.changeSeq <= through }, through, vault.changeSeq)
+        }
+    }
+
+    /**
+     * Reads the latest write headers of several sections, without their ciphertext: what a writer
+     * reads before chaining its writes (`PROTOCOL.md` §8.3). Takes no lock, so it never waits for
+     * writes or write pauses.
+     *
+     * @param caller Authenticated user.
+     * @param sections 1 to 100 distinct sections, in any vaults.
+     * @return The headers found, and the sections that were never written or that live in a vault
+     *   the caller is not a member of or that was deleted, both in request order.
+     */
+    public fun headers(caller: UserId, sections: List<SectionRef>): SectionHeadersBatch = context.operation("batchGetSectionHeaders") {
+        Validation.size(sections, 1..Limits.MAX_BATCH_SIZE, "/sections")
+        Validation.unique(sections, "/sections") { it }
+        asCaller(caller) {
+            val found = SectionRepository.readableHeaders(sections, caller)
+            SectionHeadersBatch(
+                items = sections.mapNotNull(found::get),
+                missing = sections.filterNot(found::containsKey),
+            )
         }
     }
 

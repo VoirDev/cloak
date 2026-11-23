@@ -70,6 +70,7 @@ class VaultDeletionTest {
         assertCloakError(CloakErrorCode.NOT_FOUND) { cloak.server.sections.write(alice.id, ref, input) }
         assertCloakError(CloakErrorCode.NOT_FOUND) { cloak.server.sections.list(alice.id, vault) }
         assertCloakError(CloakErrorCode.NOT_FOUND) { cloak.server.sections.headers(alice.id, vault) }
+        assertEquals(listOf(ref), cloak.server.sections.headers(alice.id, listOf(ref)).missing)
         assertCloakError(CloakErrorCode.NOT_FOUND) { cloak.server.vaults.keys(alice.id, vault) }
         assertCloakError(CloakErrorCode.NOT_FOUND) { cloak.addMember(alice, vault, bob, Role.VIEWER) }
         assertCloakError(CloakErrorCode.NOT_FOUND) { cloak.server.members.pauseWrites(alice.id, listOf(vault)) }

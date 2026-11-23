@@ -2,6 +2,8 @@ package dev.voir.cloak.spring.web
 
 import dev.voir.cloak.api.models.BatchGetNodesRequest
 import dev.voir.cloak.api.models.BatchGetNodesResponse
+import dev.voir.cloak.api.models.BatchGetSectionHeadersRequest
+import dev.voir.cloak.api.models.BatchGetSectionHeadersResponse
 import dev.voir.cloak.api.models.BatchWriteRequest
 import dev.voir.cloak.api.models.BatchWriteResponse
 import dev.voir.cloak.api.models.NodeSections
@@ -27,7 +29,8 @@ import org.springframework.web.bind.annotation.RequestParam
 import org.springframework.web.bind.annotation.RestController
 
 /**
- * `…/sections` and `…/section-headers` of a vault, `/sections/batch-write` and `/nodes…`.
+ * `…/sections` and `…/section-headers` of a vault, `/sections/batch-write`, `/section-headers/batch-get`
+ * and `/nodes…`.
  *
  * @property cloak Cloak operations.
  * @property callers Caller resolution.
@@ -92,6 +95,12 @@ internal class SectionController(
     @CloakOperation("batchWriteSections")
     fun batchWrite(request: HttpServletRequest, @RequestBody body: BatchWriteRequest): BatchWriteResponse =
         BatchWriteResponse(cloak.sections.batchWrite(callers.require(request), body.toCore()).map { it.header.toApi() })
+
+    /** `POST /section-headers/batch-get`. */
+    @PostMapping("/section-headers/batch-get")
+    @CloakOperation("batchGetSectionHeaders")
+    fun batchHeaders(request: HttpServletRequest, @RequestBody body: BatchGetSectionHeadersRequest): BatchGetSectionHeadersResponse =
+        cloak.sections.headers(callers.require(request), body.toCore()).toApi()
 
     /** `GET /nodes/{nodeId}`. */
     @GetMapping("/nodes/{nodeId}")

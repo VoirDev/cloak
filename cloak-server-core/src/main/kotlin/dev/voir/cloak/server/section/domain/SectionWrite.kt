@@ -274,3 +274,16 @@ public data class NodeSectionsBatch(
     /** Requested nodes without one. */
     public val missingNodeIds: List<NodeId>,
 )
+
+/**
+ * Result of reading the latest write headers of several sections.
+ *
+ * @property items Latest writes without their ciphertext, in request order.
+ * @property missing Requested sections without a latest write the caller can read, in request order.
+ */
+public data class SectionHeadersBatch(
+    /** Latest writes without their ciphertext, in request order. */
+    public val items: List<SectionHeader>,
+    /** Requested sections without a latest write the caller can read. */
+    public val missing: List<SectionRef>,
+)

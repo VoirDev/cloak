@@ -690,6 +690,71 @@ describe('a malicious server', () => {
     });
   });
 
+  it('cannot roll back, fork or swap the latest writes a writer chains to', async () => {
+    const alice = await victim();
+    const vault = await alice.session.createVault();
+    const node = await alice.session.createNode(vault.id, 'record');
+    const other = nodeIdFor(await alice.session.createNode(vault.id, 'other'));
+    await alice.session.writeSection(vault.id, node, 'general', { type: 'server', content: 'v1' });
+    const write = () =>
+      alice.session.writeSections([
+        { vaultId: vault.id, node, name: 'general', type: 'server', content: 'v2' },
+        { vaultId: vault.id, node, name: 'notes', type: 'server', content: 'new' },
+      ]);
+    const lie = (change: (answer: Schemas['BatchGetSectionHeadersResponse']) => unknown): void => {
+      alice.hostile.rewrite = async (request, response) => {
+        if (request.method !== 'POST' || pathOf(request) !== '/section-headers/batch-get')
+          return undefined;
+        return json(change((await response.json()) as Schemas['BatchGetSectionHeadersResponse']));
+      };
+    };
+    const stored = await fetch(`${inject('cloakBaseUrl')}/section-headers/batch-get`, {
+      method: 'POST',
+      headers: { [USER_HEADER]: alice.userId, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sections: [{ vaultId: vault.id, nodeId: nodeIdFor(node), sectionName: 'general' }],
+      }),
+    });
+    const [header] = ((await stored.json()) as Schemas['BatchGetSectionHeadersResponse']).items;
+    if (header === undefined) throw new Error('The section was not written');
+    const notes = { vaultId: vault.id, nodeId: nodeIdFor(node), sectionName: 'notes' };
+
+    // A section this device saw, claimed absent; another write of the version it saw.
+    lie(() => ({ items: [], missing: [header, notes] }));
+    await expect(write()).rejects.toMatchObject({ reason: 'rollback' });
+    lie(() => ({ items: [{ ...header, ciphertextHash: header.writeHash }], missing: [notes] }));
+    await expect(write()).rejects.toMatchObject({ reason: 'fork' });
+
+    // An answer for another section, twice for one, short of one, or for one never asked.
+    const misplaced = [
+      { items: [{ ...header, nodeId: other }], missing: [notes] },
+      { items: [header, header], missing: [notes] },
+      { items: [header], missing: [] },
+      { items: [header], missing: [notes, { ...notes, sectionName: 'extra' }] },
+    ];
+    for (const answer of misplaced) {
+      lie(() => answer);
+      await expect(write()).rejects.toMatchObject({ reason: 'state_mismatch' });
+    }
+
+    // A lookup refused as not found is a failure, never a list of new sections.
+    let wrote = false;
+    alice.hostile.intercept = (request) => {
+      const path = pathOf(request);
+      if (path === '/sections/batch-write') wrote = true;
+      return Promise.resolve(
+        path === '/section-headers/batch-get' ? problem('not_found', 404) : undefined,
+      );
+    };
+    alice.hostile.rewrite = undefined;
+    await expect(write()).rejects.toMatchObject({ code: 'not_found' });
+    expect(wrote).toBe(false);
+
+    alice.hostile.intercept = undefined;
+    const written = await write();
+    expect(written.map((info) => info.dataVersion)).toEqual([2, 1]);
+  });
+
   it('cannot get a malformed response used', async () => {
     const alice = await victim();
     const vault = await alice.session.createVault();

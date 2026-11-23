@@ -125,11 +125,12 @@ public signature Java cannot call fails the build.
   vault deletion, erasure, purges, groups of vaults and invitations. `maliciousServer.e2e.ts` puts
   a lying server between client and server and shows each attack is caught: a vault key of the
   server's choosing, a member nobody added, a pinned person's keys swapped, a demoted editor's
-  backdated write, a section rolled back or forked, a vault log rolled back or forked with a validly
+  backdated write, a section rolled back or forked, the latest writes a writer chains to rolled
+  back, forked or answered for other sections, a vault log rolled back or forked with a validly
   signed branch, a false role, writes signed with replaced keys, a forged leaf list, swapped or
   false proofs, and a ciphertext other than the signed one. `scale.e2e.ts` shows the request counts
-  on a vault of 1 300 sections, a later session continuing from its snapshot, and a checkpoint
-  built again while writes race it.
+  of a batch of 100 writes and on a vault of 1 300 sections, a later session continuing from its
+  snapshot, and a checkpoint built again while writes race it.
 
 ## Versioning
 

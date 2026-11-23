@@ -246,6 +246,12 @@ class CloakApiTest {
         assertEquals(2, api.call(GET, "/nodes/${node.value}", alice)["sections"].size())
         val missing = Uuid.random().toString()
         assertEquals(listOf(missing), api.call(POST, "/nodes/batch-get", alice, mapOf("nodeIds" to listOf(node.value.toString(), missing)))["missingNodeIds"].elements().map { it.asString() })
+        val asked = listOf("general", "absent").map { mapOf("vaultId" to vault.value.toString(), "nodeId" to node.value.toString(), "sectionName" to it) }
+        val latest = api.call(POST, "/section-headers/batch-get", alice, mapOf("sections" to asked))
+        assertEquals(headers["items"][0], latest["items"][0])
+        assertEquals(1, latest["items"].size())
+        assertEquals("absent", latest["missing"][0]["sectionName"].asString())
+        assertEquals("/sections/1", api.call(POST, "/section-headers/batch-get", alice, mapOf("sections" to listOf(asked[0], asked[0])))["errors"][0]["pointer"].asString())
 
         val bob = registered()
         addMember(alice, target, bob, Role.EDITOR)
