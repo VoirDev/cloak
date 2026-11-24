@@ -269,7 +269,9 @@ client accepts depends on them.
 sections per vault, and `max-stored-sections-per-vault` stored ones, deletions included. A write
 that would make one more live section answers `validation_failed`, rule `max_sections`, so a
 checkpoint stays bounded; a new section past the stored limit answers rule `max_stored_sections`,
-while writing an existing one never does. A batch rotation and a batch read take up to 100 vaults.
+while writing an existing one never does. A vault holds at most 100 000 created nodes, so its log
+and every member's view of it stay bounded: a `node_created` past that answers `validation_failed`,
+rule `max_nodes`. A batch rotation and a batch read take up to 100 vaults.
 The Argon2id bounds are those of `PROTOCOL.md` §5.3.
 
 Batch writes are atomic and never split, so the app keeps each batch within the request body limit

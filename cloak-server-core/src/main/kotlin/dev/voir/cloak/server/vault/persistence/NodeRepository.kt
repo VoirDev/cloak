@@ -24,6 +24,15 @@ import org.jetbrains.exposed.v1.jdbc.selectAll
  */
 internal object NodeRepository {
     /**
+     * Counts the nodes created in one vault.
+     *
+     * @param vaultId The vault.
+     * @return How many nodes have their home there.
+     */
+    fun createdCount(vaultId: VaultId): Long =
+        NodesTable.selectAll().where { NodesTable.vaultId eq vaultId.value }.count()
+
+    /**
      * The stored nodes of one vault, looked up one node at a time, so a vault with many nodes is
      * never loaded whole.
      *

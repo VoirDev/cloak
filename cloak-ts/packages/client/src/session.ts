@@ -154,6 +154,20 @@ export interface CloakSession {
   createNode(homeVaultId: string, nodeKey: string): Promise<NodeRef>;
 
   /**
+   * Creates up to 100 nodes in one home vault with one request, together or not at all, as
+   * {@link CloakSession.createNode} creates one: each `node_created` stays a request of its own in
+   * the log (`PROTOCOL.md` §7.3). Nodes that exist already, and keys given twice, are skipped, so
+   * calling it again after a failure creates only what is missing.
+   *
+   * @param homeVaultId The nodes' home vault.
+   * @param nodeKeys The application's keys for the nodes; ones other users cannot choose.
+   * @returns The nodes, in the order of [nodeKeys].
+   * @throws {CloakSectionError} `not_shared` when the user has not accepted the home vault.
+   * @throws {RangeError} for more than 100 distinct keys.
+   */
+  createNodes(homeVaultId: string, nodeKeys: readonly string[]): Promise<readonly NodeRef[]>;
+
+  /**
    * Shares sections of the user's node into another vault where the user is an admin
    * (`PROTOCOL.md` §7.7): `*` for every section, which lets that vault's editors add sections the
    * owner never used, or the names to share. Members of that vault then read them; taking them back
@@ -1528,6 +1542,57 @@ export function createSession(context: SessionContext): CloakSession {
         return { kind: 'node_created', nodeId, nodeKey };
       });
       return node;
+    },
+
+    async createNodes(homeVaultId, nodeKeys) {
+      const keys = [...new Set(nodeKeys)];
+      if (keys.length > 100) throw new RangeError('At most 100 nodes are created together');
+      const nodeOf = (key: string): NodeRef => ({ owner: self.hostUserId, home: homeVaultId, key });
+      if (keys.length === 0) return [];
+      await retrying([homeVaultId], async (own) => {
+        const record = await book.verify(homeVaultId);
+        // As for one node: never make a vault the user did not accept the home of a secret.
+        if (!record.view.accepted) {
+          const [first = ''] = keys;
+          throw new CloakSectionError(
+            homeVaultId,
+            nodeIdOf(originOf(nodeOf(first))),
+            '',
+            'not_shared',
+          );
+        }
+        const missing = keys.filter(
+          (key) => !record.state.nodes.has(nodeIdOf(originOf(nodeOf(key)))),
+        );
+        if (missing.length === 0) return;
+        const head = logHead(record.state);
+        let seq = head.seq;
+        let previousHash = head.hash;
+        const log = missing.map((key) => {
+          const fields = entryFields(
+            record,
+            {
+              kind: 'node_created',
+              nodeId: nodeIdOf(originOf(nodeOf(key))),
+              nodeKey: key,
+              keyVersion: head.keyVersion,
+              requestEnd: true,
+            },
+            seq + 1,
+            previousHash,
+          );
+          seq += 1;
+          previousHash = entryHash(fields);
+          return signEntry(fields, own);
+        });
+        await body(
+          api.POST('/vaults/{vaultId}/node-entries/batch-append', {
+            params: { path: { vaultId: homeVaultId } },
+            body: { log },
+          }),
+        );
+      });
+      return nodeKeys.map(nodeOf);
     },
 
     async shareNode(node, vaultId, sections) {

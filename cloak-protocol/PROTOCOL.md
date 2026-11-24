@@ -800,7 +800,11 @@ verify again on read, because the server is not trusted.
 ### 12.5 Nodes and sections
 
 Create a node with a signed `node_created` in its home vault (`POST /vaults/{id}/node-entries`,
-§7.7), which also carries `node_shared` and `node_unshared`; then write its sections, each first
+§7.7), which also carries `node_shared` and `node_unshared`, or up to 100 nodes at once
+(`POST /vaults/{id}/node-entries/batch-append`): each `node_created` is still a request of its own,
+chained to the one before and checked as if sent alone, and the server applies them together or
+not at all, so the log is the same either way. A vault holds at most 100 000 created nodes. Then
+write the nodes' sections, each first
 write with `dataVersion` 1. Writes, deletions and moves follow §8.3, one at a time
 (`PUT /vaults/{id}/sections/{nodeId}/{name}`) or up to 100 at once in any of one's vaults
 (`POST /sections/batch-write`), applied together or not at all. A move is a deletion in one vault
