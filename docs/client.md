@@ -140,6 +140,12 @@ writes. Create a node only when the user creates the record, after showing who w
 home vault's members. Never create one because the server or host says a record lives somewhere
 new; that would let a server choose who reads a new secret.
 
+`createNodes(homeVaultId, keys)` creates up to 100 nodes in one request, together or not at all:
+three requests in all, however many nodes, where `createNode` takes three per node. Each node is
+still a `node_created` of its own in the log, so every member reads it as if they came one at a
+time. Nodes that exist already are skipped, so calling it again after a failure creates only what
+is missing. A vault holds at most 100 000 nodes.
+
 `shareNode(node, vaultId, names)` lets the members of another vault, where the user is an admin,
 read the named sections; `'*'` shares every section, which also lets that vault's editors add
 sections the owner never used. `unshareNode` takes names back: they stop counting for everyone,

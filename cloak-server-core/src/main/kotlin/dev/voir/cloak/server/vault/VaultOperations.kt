@@ -24,6 +24,7 @@ import dev.voir.cloak.server.vault.domain.CheckpointProof
 import dev.voir.cloak.server.vault.domain.CheckpointProofQuery
 import dev.voir.cloak.server.vault.domain.CreateVaultCommand
 import dev.voir.cloak.server.vault.domain.LeafProof
+import dev.voir.cloak.server.vault.domain.LogEntry
 import dev.voir.cloak.server.vault.domain.LogEntryInput
 import dev.voir.cloak.server.vault.domain.LogEntryKind
 import dev.voir.cloak.server.vault.domain.Role
@@ -37,6 +38,7 @@ import dev.voir.cloak.server.vault.persistence.CheckpointRepository
 import dev.voir.cloak.server.vault.persistence.LogRepository
 import dev.voir.cloak.server.vault.persistence.MemberRepository
 import dev.voir.cloak.server.vault.persistence.MemberRow
+import dev.voir.cloak.server.vault.persistence.NodeRepository
 import dev.voir.cloak.server.vault.persistence.VaultKeyRepository
 import dev.voir.cloak.server.vault.persistence.VaultRepository
 import dev.voir.cloak.server.vault.persistence.VaultRow
@@ -151,19 +153,70 @@ public class VaultOperations internal constructor(
      * @param vaultId The vault.
      * @param log The signed entry.
      * @return The vault after it.
-     * @throws CloakException `validation_failed` for another kind, `not_found` unless the caller is a
-     *   member of a vault not deleted, and the errors of [LogAppender.verify].
+     * @throws CloakException `validation_failed` for another kind, or rule `max_nodes` for a
+     *   `node_created` past [Limits.MAX_NODES_PER_VAULT]; `not_found` unless the caller is a member
+     *   of a vault not deleted, and the errors of [LogAppender.verify].
      */
     public fun appendNodeEntry(caller: UserId, vaultId: VaultId, log: LogEntryInput): Vault = context.operation("appendNodeEntry") {
         Validation.require(log.kind in NODE_KINDS, "/log/kind", "log_mismatch", "Must be node_created, node_shared or node_unshared.")
-        asCaller(caller) {
-            val view = VaultAccess.lockForMember(caller, vaultId)
-            val appender = LogAppender(DatabaseKeyDirectory(), context.clock.now(), this)
-            val request = appender.verify(LogAppender.stateOf(view.vault, view.members), caller, listOf(log), emptyList(), "/log")
-            appender.store(request)
-            val (vault, member) = VaultAccess.readAsMember(caller, vaultId)
-            VaultAccess.toVault(vault, member)
+        appendNodeEntries(caller, vaultId, listOf(log)) { "/log" }
+    }
+
+    /**
+     * Creates up to 100 nodes in one vault, together or not at all: each `node_created` is a request
+     * of its own (`PROTOCOL.md` §7.3), checked in the state the one before it left, exactly as if it
+     * had been sent alone to [appendNodeEntry]. The log is the same either way.
+     *
+     * @param caller Authenticated user.
+     * @param vaultId The vault.
+     * @param log The signed `node_created` entries, in `seq` order.
+     * @return The vault after them.
+     * @throws CloakException `validation_failed` for an empty or oversized list, another kind, or
+     *   rule `max_nodes` for an entry past [Limits.MAX_NODES_PER_VAULT], and the errors of
+     *   [appendNodeEntry] for the first entry that fails.
+     */
+    public fun appendNodeEntries(caller: UserId, vaultId: VaultId, log: List<LogEntryInput>): Vault = context.operation("batchAppendNodeEntries") {
+        Validation.size(log, 1..Limits.MAX_BATCH_SIZE, "/log")
+        log.forEachIndexed { index, entry ->
+            Validation.require(entry.kind == LogEntryKind.NODE_CREATED, "/log/$index/kind", "log_mismatch", "Must be node_created.")
         }
+        appendNodeEntries(caller, vaultId, log) { "/log/$it" }
+    }
+
+    /**
+     * Verifies node entries one request at a time under the vault's lock, each against the state
+     * the one before it left, then stores them once: the state carries every node the entries
+     * created, so storing after each would store the earlier ones again.
+     */
+    private fun CloakContext.OperationScope.appendNodeEntries(
+        caller: UserId,
+        vaultId: VaultId,
+        inputs: List<LogEntryInput>,
+        pointerOf: (Int) -> String,
+    ): Vault = asCaller(caller) {
+        val view = VaultAccess.lockForMember(caller, vaultId)
+        val appender = LogAppender(DatabaseKeyDirectory(), context.clock.now(), this)
+        var state = LogAppender.stateOf(view.vault, view.members)
+        val entries = mutableListOf<LogEntry>()
+        val states = mutableListOf<LogState>()
+        inputs.forEachIndexed { index, input ->
+            val request = appender.verify(state, caller, listOf(input), emptyList(), pointerOf(index))
+            entries += request.entries
+            states += request.states
+            state = request.after
+        }
+        val created = inputs.indices.filter { inputs[it].kind == LogEntryKind.NODE_CREATED }
+        if (created.isNotEmpty()) {
+            // The table holds only the nodes stored before this request.
+            val room = Limits.MAX_NODES_PER_VAULT - NodeRepository.createdCount(vaultId)
+            if (created.size > room) {
+                val past = created[room.coerceAtLeast(0).toInt()]
+                throw CloakException.invalid(pointerOf(past), "max_nodes", "The vault has ${Limits.MAX_NODES_PER_VAULT} nodes already.")
+            }
+        }
+        appender.store(VerifiedRequest(entries, states, null))
+        val (vault, member) = VaultAccess.readAsMember(caller, vaultId)
+        VaultAccess.toVault(vault, member)
     }
 
     /**

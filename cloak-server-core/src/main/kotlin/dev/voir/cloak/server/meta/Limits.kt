@@ -65,6 +65,9 @@ public data class Limits(
         /** Most live sections of one vault: a deletion does not count. */
         public const val MAX_SECTIONS_PER_VAULT: Int = 100_000
 
+        /** Most nodes created in one vault, so its log and every member's view of it stay bounded. */
+        public const val MAX_NODES_PER_VAULT: Int = 100_000
+
         /** Most entries of one rotation request: a removal per member, then `key_rotated`. */
         internal const val MAX_ROTATION_ENTRIES: Int = MAX_MEMBERS_PER_VAULT + 1
 

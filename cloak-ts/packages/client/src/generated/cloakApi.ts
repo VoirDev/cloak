@@ -308,9 +308,34 @@ export interface paths {
          * Create, share or take back a node
          * @description Appends one signed `node_created`, `node_shared` or `node_unshared` entry (`PROTOCOL.md`
          *     §7.7). Only the node's owner creates and shares it: its id derives from them. A node's
-         *     sections are valid only where these entries put it.
+         *     sections are valid only where these entries put it. A vault holds at most 100 000 created
+         *     nodes; a `node_created` past that is refused with `validation_failed`, rule `max_nodes`.
          */
         post: operations["appendNodeEntry"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vaults/{vaultId}/node-entries/batch-append": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create several nodes at once
+         * @description Appends up to `maxBatchSize` signed `node_created` entries (`PROTOCOL.md` §7.7), applied
+         *     together or not at all. Each entry is a request of its own (`requestEnd` true), chained to
+         *     the one before it, and is checked in the vault's state right after the previous one, as if
+         *     it had been sent alone to `appendNodeEntry`. A vault holds at most 100 000 created nodes;
+         *     an entry past that is refused with `validation_failed`, rule `max_nodes`.
+         */
+        post: operations["batchAppendNodeEntries"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1045,6 +1070,10 @@ export interface components {
         };
         LogEntryRequest: {
             log: components["schemas"]["LogEntryInput"];
+        };
+        BatchAppendNodeEntriesRequest: {
+            /** @description Signed `node_created` entries by the caller, each with `requestEnd` true, in `seq` order. */
+            log: components["schemas"]["LogEntryInput"][];
         };
         AcceptInviterRequest: {
             inviterUserId: components["schemas"]["Uuid"];
@@ -2228,6 +2257,43 @@ export interface operations {
         };
         responses: {
             /** @description Entry appended. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Vault"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            410: components["responses"]["Gone"];
+            413: components["responses"]["PayloadTooLarge"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    batchAppendNodeEntries: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Vault id. */
+                vaultId: components["parameters"]["VaultId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BatchAppendNodeEntriesRequest"];
+            };
+        };
+        responses: {
+            /** @description Entries appended. */
             200: {
                 headers: {
                     [name: string]: unknown;

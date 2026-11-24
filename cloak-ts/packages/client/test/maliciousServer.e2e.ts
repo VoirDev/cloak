@@ -755,6 +755,25 @@ describe('a malicious server', () => {
     expect(written.map((info) => info.dataVersion)).toEqual([2, 1]);
   });
 
+  it('cannot make a write stand by claiming nodes were created', async () => {
+    const alice = await victim();
+    const vault = await alice.session.createVault();
+    alice.hostile.intercept = async (request) => {
+      if (pathOf(request) !== `/vaults/${vault.id}/node-entries/batch-append`) return undefined;
+      const view = await fetch(`${inject('cloakBaseUrl')}/vaults/${vault.id}`, {
+        headers: { [USER_HEADER]: alice.userId },
+      });
+      return json(await view.json());
+    };
+
+    const [node] = await alice.session.createNodes(vault.id, ['record']);
+    if (node === undefined) throw new Error('No node');
+    alice.hostile.intercept = undefined;
+    await expect(
+      alice.session.writeSection(vault.id, node, 'general', { type: 'server', content: 'x' }),
+    ).rejects.toMatchObject({ reason: 'not_shared' });
+  });
+
   it('cannot get a malformed response used', async () => {
     const alice = await victim();
     const vault = await alice.session.createVault();

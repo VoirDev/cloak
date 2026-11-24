@@ -717,6 +717,33 @@ describe('the TypeScript client against the Kotlin server', () => {
     expect((await bob.session.listVaults()).items.map((item) => item.id)).not.toContain(vault.id);
   });
 
+  it('creates many nodes at once, which another member verifies and writes', async () => {
+    const alice = await user();
+    const bob = await user();
+    const vault = await alice.session.createVault();
+    await meet(alice, bob);
+    await alice.session.addMember(vault.id, bob.userId, 'editor');
+    const head = (await bob.session.openVault(vault.id)).logSeq;
+    const keys = Array.from({ length: 100 }, (_, index) => `record-${String(index)}`);
+
+    const nodes = await alice.session.createNodes(vault.id, [...keys, 'record-0']);
+
+    expect(nodes.map((node) => node.key)).toEqual([...keys, 'record-0']);
+    expect((await bob.session.openVault(vault.id)).logSeq).toBe(head + 100);
+    const last = nodes[99];
+    if (last === undefined) throw new Error('No node');
+    await bob.session.writeSection(vault.id, last, 'general', { type: 'server', content: 'x' });
+    expect(contentOf(await alice.session.readSection(vault.id, nodeIdFor(last), 'general'))).toBe(
+      'x',
+    );
+    // Created nodes are skipped, so asking again after a failure creates only what is missing.
+    await alice.session.createNodes(vault.id, [...keys.slice(50), 'record-100']);
+    expect((await bob.session.openVault(vault.id)).logSeq).toBe(head + 101);
+    await expect(alice.session.createNodes(vault.id, [...keys, 'a', 'b'])).rejects.toThrow(
+      RangeError,
+    );
+  });
+
   it('lists vaults one was added to only once they are accepted', async () => {
     const alice = await user();
     const bob = await user();

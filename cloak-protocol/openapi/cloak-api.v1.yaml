@@ -656,7 +656,8 @@ paths:
       description: |
         Appends one signed `node_created`, `node_shared` or `node_unshared` entry (`PROTOCOL.md`
         §7.7). Only the node's owner creates and shares it: its id derives from them. A node's
-        sections are valid only where these entries put it.
+        sections are valid only where these entries put it. A vault holds at most 100 000 created
+        nodes; a `node_created` past that is refused with `validation_failed`, rule `max_nodes`.
       parameters:
         - $ref: '#/components/parameters/VaultId'
       requestBody:
@@ -668,6 +669,53 @@ paths:
       responses:
         '200':
           description: Entry appended.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Vault'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /vaults/{vaultId}/node-entries/batch-append:
+    post:
+      tags: [Vaults]
+      operationId: batchAppendNodeEntries
+      summary: Create several nodes at once
+      description: |
+        Appends up to `maxBatchSize` signed `node_created` entries (`PROTOCOL.md` §7.7), applied
+        together or not at all. Each entry is a request of its own (`requestEnd` true), chained to
+        the one before it, and is checked in the vault's state right after the previous one, as if
+        it had been sent alone to `appendNodeEntry`. A vault holds at most 100 000 created nodes;
+        an entry past that is refused with `validation_failed`, rule `max_nodes`.
+      parameters:
+        - $ref: '#/components/parameters/VaultId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchAppendNodeEntriesRequest'
+      responses:
+        '200':
+          description: Entries appended.
           content:
             application/json:
               schema:
@@ -2151,6 +2199,17 @@ components:
       properties:
         log:
           $ref: '#/components/schemas/LogEntryInput'
+    BatchAppendNodeEntriesRequest:
+      type: object
+      required: [log]
+      properties:
+        log:
+          type: array
+          description: Signed `node_created` entries by the caller, each with `requestEnd` true, in `seq` order.
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/LogEntryInput'
     AcceptInviterRequest:
       type: object
       required: [inviterUserId]

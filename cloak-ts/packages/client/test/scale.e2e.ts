@@ -194,6 +194,35 @@ describe('the client on large vaults', () => {
     expect(lookups()).toBe(0);
   });
 
+  it('creates 100 nodes with one append, and never signs for a vault the user did not accept', async () => {
+    const alice = await counted();
+    const bob = await counted();
+    const vault = await alice.session.createVault();
+    const appends = (user: Counted) =>
+      count(user, 'POST', /^\/vaults\/[^/]+\/node-entries\/batch-append$/);
+    const single = (user: Counted) => count(user, 'POST', /^\/vaults\/[^/]+\/node-entries$/);
+    const keys = Array.from({ length: 100 }, (_, index) => `record-${String(index)}`);
+
+    alice.sent.length = 0;
+    await alice.session.createNodes(vault.id, keys);
+    expect(appends(alice)).toBe(1);
+    expect(single(alice)).toBe(0);
+    expect(alice.sent.length).toBe(3);
+
+    alice.sent.length = 0;
+    await alice.session.createNodes(vault.id, keys);
+    expect(appends(alice)).toBe(0);
+
+    // Bob never accepted what Alice adds him to: nothing is signed for that vault.
+    await alice.session.confirmFingerprint(bob.userId, bob.session.fingerprint);
+    await alice.session.addMember(vault.id, bob.userId, 'editor');
+    bob.sent.length = 0;
+    await expect(bob.session.createNodes(vault.id, ['mine'])).rejects.toMatchObject({
+      reason: 'not_shared',
+    });
+    expect(appends(bob)).toBe(0);
+  });
+
   it('continues a later session from the snapshot this device kept', async () => {
     const alice = await counted();
     const bob = await counted();

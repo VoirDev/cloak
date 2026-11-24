@@ -121,15 +121,16 @@ public signature Java cannot call fails the build.
   the password worker and persistent storage.
 - `pnpm test:e2e`: the whole client against the real Kotlin server, through `cloak-dev-server`.
   `client.e2e.ts` runs the honest flows: registration and recovery, roles and checkpoints,
-  rotations, nodes across vaults and their placement, moves, leaving, key replacement, account and
-  vault deletion, erasure, purges, groups of vaults and invitations. `maliciousServer.e2e.ts` puts
-  a lying server between client and server and shows each attack is caught: a vault key of the
-  server's choosing, a member nobody added, a pinned person's keys swapped, a demoted editor's
-  backdated write, a section rolled back or forked, the latest writes a writer chains to rolled
-  back, forked or answered for other sections, a vault log rolled back or forked with a validly
-  signed branch, a false role, writes signed with replaced keys, a forged leaf list, swapped or
-  false proofs, and a ciphertext other than the signed one. `scale.e2e.ts` shows the request counts
-  of a batch of 100 writes and on a vault of 1 300 sections, a later session continuing from its
+  rotations, nodes across vaults and their placement, many nodes at once, moves, leaving, key
+  replacement, account and vault deletion, erasure, purges, groups of vaults and invitations.
+  `maliciousServer.e2e.ts` puts a lying server between client and server and shows each attack is
+  caught: a vault key of the server's choosing, a member nobody added, a pinned person's keys
+  swapped, a demoted editor's backdated write, a section rolled back or forked, nodes claimed
+  created that the log does not hold, the latest writes a writer chains to rolled back, forked or
+  answered for other sections, a vault log rolled back or forked with a validly signed branch, a
+  false role, writes signed with replaced keys, a forged leaf list, swapped or false proofs, and a
+  ciphertext other than the signed one. `scale.e2e.ts` shows the request counts of a batch of 100
+  writes and of 100 nodes, and on a vault of 1 300 sections, a later session continuing from its
   snapshot, and a checkpoint built again while writes race it.
 
 ## Versioning

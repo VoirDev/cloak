@@ -333,6 +333,23 @@ class CloakApiTest {
         val (again, _) = entry(alice, vault, LogEntryKind.NODE_CREATED, nodeId = node, nodeKey = origins.getValue(node).nodeKey.value)
         assertEquals("log_rejected", api.call(POST, "/vaults/${vault.value}/node-entries", alice, mapOf("log" to CloakApi.log(again))).code)
 
+        val (seq, hash, keyVersion) = head(alice, vault)
+        var previous = hash
+        val batch = listOf("batch-a", "batch-b").mapIndexed { index, key ->
+            val origin = NodeOrigin(alice.id, vault, NodeKey(key))
+            origins[origin.nodeId] = origin
+            val (input, entryHash) = TestProtocol.logEntry(
+                alice, vault, seq + 1 + index, previous, LogEntryKind.NODE_CREATED, keyVersion = keyVersion, nodeId = origin.nodeId, nodeKey = key,
+            )
+            previous = entryHash
+            input
+        }
+        val appended = api.call(POST, "/vaults/${vault.value}/node-entries/batch-append", alice, mapOf("log" to batch.map(CloakApi::log)))
+        assertEquals(seq + 2, appended["logSeq"].asLong())
+        val unshare = api.call(POST, "/vaults/${vault.value}/node-entries/batch-append", alice, mapOf("log" to listOf(CloakApi.log(again.copy(kind = LogEntryKind.NODE_UNSHARED)))))
+        assertEquals("/log/0/kind", unshare["errors"][0]["pointer"].asString())
+        assertEquals(200, write(alice, vault, checkNotNull(batch.last().nodeId), "general").status)
+
         val (deletion, _) = entry(alice, team, LogEntryKind.VAULT_DELETED)
         assertEquals("role_required", api.call(POST, "/vaults/${team.value}/deletion", bob, mapOf("log" to CloakApi.log(deletion))).code)
         assertEquals(204, api.call(POST, "/vaults/${team.value}/deletion", alice, mapOf("log" to CloakApi.log(deletion))).status)

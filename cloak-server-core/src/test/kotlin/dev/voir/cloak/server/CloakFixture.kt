@@ -138,6 +138,26 @@ internal class CloakFixture(settings: CloakSettings = CloakSettings.defaults()) 
     }
 
     /**
+     * Signs `node_created` entries of [owner] in [vaultId] for [keys], chained from the head [owner]
+     * sees, each a request of its own (`PROTOCOL.md` §7.3), and remembers their origins.
+     *
+     * @return The entries, in `seq` order.
+     */
+    fun nodeEntries(owner: TestClient, vaultId: VaultId, keys: List<String>): List<LogEntryInput> {
+        val head = vault(owner, vaultId)
+        var previous: ByteString? = head.logHeadHash
+        return keys.mapIndexed { index, key ->
+            val nodeId = know(NodeOrigin(owner.id, vaultId, NodeKey(key)))
+            val input = entry(
+                owner, vaultId, LogEntryKind.NODE_CREATED,
+                seq = head.logSeq + 1 + index, previousHash = previous, nodeId = nodeId, nodeKey = key,
+            )
+            previous = sha256(Messages.logEntry(input.toFields(vaultId, owner, previous)))
+            input
+        }
+    }
+
+    /**
      * Shares names of a node into another vault as its owner, with a signed `node_shared`.
      *
      * @return The vault after the entry.

@@ -6,6 +6,7 @@ import dev.voir.cloak.api.models.BatchGetVaultsRequest
 import dev.voir.cloak.api.models.BatchGetVaultsResponse
 import dev.voir.cloak.api.models.CheckpointLeafPage
 import dev.voir.cloak.api.models.CreateVaultRequest
+import dev.voir.cloak.api.models.BatchAppendNodeEntriesRequest
 import dev.voir.cloak.api.models.LogEntryRequest
 import dev.voir.cloak.api.models.Vault
 import dev.voir.cloak.api.models.VaultKeyList
@@ -29,7 +30,8 @@ import org.springframework.web.bind.annotation.RestController
 import java.net.URI
 
 /**
- * `/vaults`, `/vaults/batch-get`, `/vaults/{vaultId}`, `…/deletion`, `…/node-entries`, `…/log`, `…/keys`,
+ * `/vaults`, `/vaults/batch-get`, `/vaults/{vaultId}`, `…/deletion`, `…/node-entries`, `…/node-entries/batch-append`,
+ * `…/log`, `…/keys`,
  * `…/checkpoints/{seq}/leaves` and `…/checkpoint-proofs/batch-get`.
  *
  * @property cloak Cloak operations.
@@ -78,6 +80,16 @@ internal class VaultController(
     @CloakOperation("appendNodeEntry")
     fun appendNodeEntry(request: HttpServletRequest, @PathVariable vaultId: String, @RequestBody body: LogEntryRequest): Vault =
         cloak.vaults.appendNodeEntry(callers.require(request), Params.vault(vaultId), body.log.toCore("/log")).toApi()
+
+    /** `POST /vaults/{vaultId}/node-entries/batch-append`: signed `node_created` entries, each a request of its own. */
+    @PostMapping("/vaults/{vaultId}/node-entries/batch-append")
+    @CloakOperation("batchAppendNodeEntries")
+    fun appendNodeEntries(request: HttpServletRequest, @PathVariable vaultId: String, @RequestBody body: BatchAppendNodeEntriesRequest): Vault =
+        cloak.vaults.appendNodeEntries(
+            callers.require(request),
+            Params.vault(vaultId),
+            body.log.mapIndexed { index, entry -> entry.toCore("/log/$index") },
+        ).toApi()
 
     /** `GET /vaults/{vaultId}/log`. */
     @GetMapping("/vaults/{vaultId}/log")
