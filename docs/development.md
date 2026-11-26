@@ -77,10 +77,12 @@ cd cloak-ts && pnpm test:e2e
 
 When a dependency or plugin is added or changes version, regenerate the file with every task
 `ci/verify` runs in Gradle, so every configuration resolves, then review the diff, which names each
-artifact the build now trusts:
+artifact the build now trusts. Run it with an empty Gradle home, as CI starts: with a filled cache
+Gradle does not read the parent POMs and BOMs again, so it leaves them out and CI fails on them.
 
 ```bash
-./gradlew --write-verification-metadata sha256 --no-configuration-cache \
+GRADLE_USER_HOME="$(mktemp -d)" ./gradlew --write-verification-metadata sha256 \
+  --no-configuration-cache \
   build publishAllPublicationsToReleaseRepository -PreleaseVersion="$(cat VERSION)"
 ```
 
