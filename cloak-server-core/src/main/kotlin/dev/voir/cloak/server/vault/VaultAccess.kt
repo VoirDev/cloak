@@ -2,8 +2,10 @@ package dev.voir.cloak.server.vault
 
 import dev.voir.cloak.server.error.CloakException
 import dev.voir.cloak.server.identity.domain.UserId
+import dev.voir.cloak.server.vault.domain.Acceptance
 import dev.voir.cloak.server.vault.domain.Role
 import dev.voir.cloak.server.vault.domain.Vault
+import dev.voir.cloak.server.vault.domain.VaultAcceptance
 import dev.voir.cloak.server.vault.domain.VaultId
 import dev.voir.cloak.server.vault.persistence.MemberRepository
 import dev.voir.cloak.server.vault.persistence.MemberRow
@@ -84,8 +86,35 @@ internal object VaultAccess {
      * @param member The member's row.
      * @return The view the API returns.
      */
-    fun toVault(vault: VaultRow, member: MemberRow): Vault {
+    fun toVault(vault: VaultRow, member: MemberRow): Vault = toVaults(listOf(vault to member)).single()
+
+    /**
+     * Describes vaults to one member, loading the inviter acceptances their views carry in one query.
+     *
+     * @param rows Each vault with the member's row; every row is the same user's.
+     * @return The views the API returns, in order.
+     */
+    fun toVaults(rows: List<Pair<VaultRow, MemberRow>>): List<Vault> {
+        val userId = rows.firstOrNull()?.second?.userId ?: return emptyList()
+        check(rows.all { (_, member) -> member.userId == userId }) { "Views of one member only" }
+        val inviters = rows.mapNotNull { (_, member) -> member.addedByUserId.takeIf { member.acceptance == null && member.accepted } }
+        val accepted = MemberRepository.inviterAcceptances(userId, inviters.toSet())
+        return rows.map { (vault, member) -> view(vault, member, member.addedByUserId?.let(accepted::get)) }
+    }
+
+    /**
+     * Describes a vault to a member.
+     *
+     * @param vault The vault.
+     * @param member The member's row.
+     * @param inviterAcceptance The member's acceptance of who added them, if any.
+     * @return The view the API returns.
+     */
+    private fun view(vault: VaultRow, member: MemberRow, inviterAcceptance: Acceptance?): Vault {
         val current = member.envelopeKeyVersion == vault.keyVersion
+        // The member's own acceptance first; otherwise, once accepted, that of who added them (§9).
+        val acceptance = member.acceptance?.let { VaultAcceptance(null, it.keyVersion, it.signature) }
+            ?: inviterAcceptance?.takeIf { member.accepted }?.let { VaultAcceptance(member.addedByUserId, it.keyVersion, it.signature) }
         return Vault(
             id = vault.id,
             role = member.membership.role,
@@ -97,6 +126,7 @@ internal object VaultAccess {
             createdByUserId = vault.createdByUserId,
             createdAt = vault.createdAt,
             accepted = member.accepted,
+            acceptance = acceptance,
             addedByUserId = member.addedByUserId,
             deleted = vault.isDeleted,
         )

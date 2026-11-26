@@ -18,11 +18,14 @@ import dev.voir.cloak.server.identity.domain.UserKeysBatch
 import dev.voir.cloak.server.identity.persistence.IdentityRepository
 import dev.voir.cloak.server.meta.Limits
 import dev.voir.cloak.server.persistence.CloakContext
+import dev.voir.cloak.server.vault.domain.VaultId
 import dev.voir.cloak.server.vault.persistence.MemberRepository
 import dev.voir.cloak.server.vault.persistence.VaultRepository
+import dev.voir.cloak.server.vault.persistence.WritePauseRepository
 import dev.voir.cloak.server.protocol.BlobRules
 import dev.voir.cloak.server.protocol.Messages
 import dev.voir.cloak.server.protocol.StrictEd25519
+import dev.voir.cloak.server.protocol.X25519Keys
 import kotlinx.io.bytestring.ByteString
 
 /**
@@ -89,7 +92,9 @@ public class IdentityOperations internal constructor(
                 if (IdentityRepository.isDeleted(userId, lock = false)) throw CloakException.identityDeleted()
                 throw CloakException(CloakErrorCode.ALREADY_EXISTS, "You already have an identity.")
             }
-            IdentityRepository.insertStatement(KeyStatement(keys, null, command.signature, null, now), Messages.keysDigest(keys))
+            if (!IdentityRepository.insertStatement(KeyStatement(keys, null, command.signature, null, now), Messages.keysDigest(keys))) {
+                throw signingKeyTaken()
+            }
             checkNotNull(IdentityRepository.find(userId))
         }
     }
@@ -150,8 +155,9 @@ public class IdentityOperations internal constructor(
      * @param command The new keys, both signatures and the new bundles.
      * @return The identity at the new key version.
      * @throws CloakException `identity_version_conflict` unless [ReplaceKeysCommand.expectedKeyVersion]
-     *   is the current version, `bad_signature` when either signature does not verify,
-     *   `already_exists` when the signing key is taken.
+     *   is the current version, `validation_failed` (rule `max_key_versions`) when the identity has
+     *   [Limits.MAX_KEY_VERSIONS] already, `bad_signature` when either signature does not verify,
+     *   `already_exists` when the signing key is taken, also by a request that raced this one.
      */
     public fun replaceKeys(caller: UserId, command: ReplaceKeysCommand): Identity = context.operation("replaceKeys") {
         BlobRules.signature(command.signature, "/signature")
@@ -162,6 +168,12 @@ public class IdentityOperations internal constructor(
         asCaller(caller) {
             val current = IdentityRepository.find(caller) ?: throw CloakException.identityRequired()
             if (command.expectedKeyVersion != current.keys.keyVersion) throw versionConflict(current.keys.keyVersion)
+            Validation.require(
+                current.keys.keyVersion < Limits.MAX_KEY_VERSIONS,
+                "/expectedKeyVersion",
+                "max_key_versions",
+                "An identity has at most ${Limits.MAX_KEY_VERSIONS} key versions.",
+            )
             val keys = PublicKeys(
                 userId = caller,
                 keyVersion = current.keys.keyVersion + 1,
@@ -186,10 +198,11 @@ public class IdentityOperations internal constructor(
                 now,
             )
             if (!advanced) throw versionConflict(current.keys.keyVersion)
-            IdentityRepository.insertStatement(
+            val stored = IdentityRepository.insertStatement(
                 KeyStatement(keys, previousDigest, command.signature, command.recoverySignature, now),
                 Messages.keysDigest(keys),
             )
+            if (!stored) throw signingKeyTaken()
             checkNotNull(IdentityRepository.find(caller))
         }
     }
@@ -203,13 +216,18 @@ public class IdentityOperations internal constructor(
      * cannot delete an account, and it expires at `notAfter`, at most 10 minutes ahead, so a
      * captured one cannot be sent again later.
      *
+     * The vaults where no other member is left who is not a deleted identity go with it, as they
+     * do on [erase]: nobody could act on them again. Its acceptances of people, theirs of it and
+     * its write pause records go too.
+     *
      * @param caller Authenticated user.
      * @param command The current credentials version, the expiry and the signature.
      * @throws CloakException `identity_required` when the caller has no identity, `validation_failed`
      *   for a statement past `notAfter` or further ahead than allowed, `credentials_version_conflict`
      *   when the credentials changed since, `bad_signature`, and `identity_in_vaults` while the caller
-     *   is an accepted member of a vault that is not deleted: they delete or leave those first. Vaults
-     *   they never accepted keep their membership in the log, with no envelope, as after [erase].
+     *   is an accepted member of a vault that is not deleted and has another member who is not
+     *   deleted: they delete or leave those first. Vaults they never accepted keep their membership
+     *   in the log, with no envelope, as after [erase].
      */
     public fun delete(caller: UserId, command: DeleteIdentityCommand) {
         BlobRules.signature(command.signature, "/signature")
@@ -222,11 +240,9 @@ public class IdentityOperations internal constructor(
                 "maximum",
                 "At most $MAX_DELETION_VALIDITY_SECONDS seconds ahead.",
             )
-            asCaller(caller) {
-                // Vaults first, then the identity, the order erasure locks them in, so clearing the
-                // envelopes below never waits on a request that holds one of these vaults.
-                VaultRepository.lock(MemberRepository.vaultsOf(caller))
-                if (!IdentityRepository.lockLive(caller)) throw CloakException.identityRequired()
+            // The identity row first, locked for update, then the vaults in id order: the order
+            // every request locks them in (CloakContext.asCaller).
+            asCaller(caller, forDeletion = true) {
                 val current = IdentityRepository.find(caller) ?: throw CloakException.identityRequired()
                 if (command.credentialsVersion != current.credentialsVersion) {
                     throw CloakException(
@@ -237,20 +253,22 @@ public class IdentityOperations internal constructor(
                 }
                 val message = Messages.identityDeletion(caller, current.keys.keyVersion, command.credentialsVersion, command.notAfter)
                 requireSignature(current.keys.signingPublicKey, message, command.signature, "/signature")
-                // Locked for update: nobody can add the caller to a vault until this commits. A
-                // deleted vault's members are no longer members anywhere (§12.3), and a vault the
-                // caller never accepted does not hold their account (§12.4).
-                if (MemberRepository.acceptedLiveVaultsOf(caller).isNotEmpty()) {
+                // With the row locked for update nobody adds the caller to a vault and no request of
+                // theirs creates one until this commits, so the list is complete.
+                VaultRepository.lock(MemberRepository.vaultsOf(caller))
+                val unattended = MemberRepository.vaultsWithoutOtherLiveMembers(caller)
+                // A deleted vault's members are no longer members anywhere (§12.3), a vault the
+                // caller never accepted does not hold their account (§12.4), and one with nobody else
+                // left who could act goes with the identity.
+                if ((MemberRepository.acceptedLiveVaultsOf(caller) - unattended.toSet()).isNotEmpty()) {
                     throw CloakException(
                         CloakErrorCode.IDENTITY_IN_VAULTS,
                         "Delete or leave every vault you accepted before deleting your identity.",
                     )
                 }
                 // The memberships never accepted stay in the logs, as after an erasure: members see
-                // them marked deleted and an admin removes them with a rotation. Nothing stays
-                // sealed to the deleted keys.
-                MemberRepository.clearEnvelopes(caller)
-                IdentityRepository.tombstone(caller, context.clock.now())
+                // them marked deleted and an admin removes them with a rotation.
+                removeIdentity(caller, unattended)
             }
         }
     }
@@ -260,13 +278,15 @@ public class IdentityOperations internal constructor(
      * will not do it themselves, such as on an erasure request or a closed account. Not part of the
      * API: call it from the host's own code.
      *
-     * Erases the identity as [delete] does, removes the vault-key envelopes sealed to it, and deletes
-     * the vaults where the user was the only member. Nobody can sign for the user, so their other
-     * memberships stay in the logs: members see them marked deleted, and an admin removes them with
-     * a rotation. Deletion does not revoke keys: what the user signed stays valid, and whoever holds
-     * their keys keeps knowing the vault keys they knew until admins remove them and rotate.
+     * Erases the identity as [delete] does, with the vault-key envelopes sealed to it, and deletes
+     * the vaults where no member is left who is not a deleted identity. Nobody can sign for the
+     * user, so their other memberships stay in the logs: members see them marked deleted, and an
+     * admin removes them with a rotation. Deletion does not revoke keys: what the user signed stays
+     * valid, and whoever holds their keys keeps knowing the vault keys they knew until admins remove
+     * them and rotate.
      *
-     * Idempotent: erasing a deleted or never registered user changes nothing.
+     * Idempotent: erasing a deleted user again only deletes the vaults left with deleted members
+     * alone since, and erasing a never registered user changes nothing.
      *
      * @param hostUserId The host's id of the user.
      * @return Whether an identity was erased by this call.
@@ -274,16 +294,30 @@ public class IdentityOperations internal constructor(
     public fun erase(hostUserId: HostUserId): Boolean = context.operation("eraseIdentity") {
         val userId = hostUserId.userId
         withoutCaller(CloakContext.Budget.CHECKPOINT) {
-            // Vaults first, then the identity, the order every request locks them in. A vault joined
-            // after the first read has another member, so it is never one to delete.
-            val sole = VaultRepository.lock(MemberRepository.vaultsOf(userId)).keys
-                .filter { vaultId -> MemberRepository.all(vaultId).keys == setOf(userId) }
-            if (!IdentityRepository.lockLive(userId)) return@withoutCaller false
-            sole.forEach(VaultRepository::delete)
-            MemberRepository.clearEnvelopes(userId)
-            IdentityRepository.tombstone(userId, context.clock.now())
-            true
+            // The identity row first, then the vaults in id order, the order every request locks
+            // them in (CloakContext.asCaller). With the row locked for update nobody adds the user to
+            // a vault and no request of theirs creates one, so the list read after it is complete.
+            val deleted = IdentityRepository.lockForUpdate(userId) ?: return@withoutCaller false
+            VaultRepository.lock(MemberRepository.vaultsOf(userId))
+            removeIdentity(userId, MemberRepository.vaultsWithoutOtherLiveMembers(userId))
+            !deleted
         }
+    }
+
+    /**
+     * Deletes an identity whose row and vaults are locked (`PROTOCOL.md` §5.7): the vaults nobody
+     * else alive is left in, every envelope sealed to it, its acceptances of people and theirs of
+     * it, and its write pause records; then it becomes a tombstone, unless it is one already.
+     *
+     * @param userId User.
+     * @param unattended The user's vaults in which no other member is left who is not deleted.
+     */
+    private fun removeIdentity(userId: UserId, unattended: List<VaultId>) {
+        unattended.forEach(VaultRepository::delete)
+        MemberRepository.clearEnvelopes(userId)
+        MemberRepository.deleteInviterAcceptances(userId)
+        WritePauseRepository.deleteOf(userId)
+        IdentityRepository.tombstone(userId, context.clock.now())
     }
 
     /**
@@ -338,6 +372,7 @@ public class IdentityOperations internal constructor(
         BlobRules.raw(keys.encryptionPublicKey, BlobRules.KEY_BYTES, "/encryptionPublicKey")
         BlobRules.raw(keys.signingPublicKey, BlobRules.KEY_BYTES, "/signingPublicKey")
         BlobRules.raw(keys.recoverySigningPublicKey, BlobRules.KEY_BYTES, "/recoverySigningPublicKey")
+        Validation.require(X25519Keys.refusal(keys.encryptionPublicKey) == null, "/encryptionPublicKey", "key", "Not a usable X25519 key.")
         Validation.require(!StrictEd25519.isUnusableKey(keys.signingPublicKey), "/signingPublicKey", "key", "Not a usable Ed25519 key.")
         Validation.require(
             !StrictEd25519.isUnusableKey(keys.recoverySigningPublicKey),
@@ -365,12 +400,17 @@ public class IdentityOperations internal constructor(
         Validation.require(kdf.parallelism == 1, "/kdf/parallelism", "const", "Must be 1.")
     }
 
-    /** Refuses a signing key any user's key version already uses. */
+    /**
+     * Refuses a signing key any user's key version already uses. A request racing this one past
+     * the check loses at [IdentityRepository.insertStatement] instead, with the same refusal.
+     */
     private fun requireFreshSigningKey(signingPublicKey: ByteString) {
-        if (IdentityRepository.isSigningKeyTaken(signingPublicKey)) {
-            throw CloakException(CloakErrorCode.ALREADY_EXISTS, "This signing key belongs to another key version.")
-        }
+        if (IdentityRepository.isSigningKeyTaken(signingPublicKey)) throw signingKeyTaken()
     }
+
+    /** An `already_exists` for a signing key another key version uses. */
+    private fun signingKeyTaken(): CloakException =
+        CloakException(CloakErrorCode.ALREADY_EXISTS, "This signing key belongs to another key version.")
 
     /** An `identity_version_conflict` at [current]. */
     private fun versionConflict(current: Int): CloakException =

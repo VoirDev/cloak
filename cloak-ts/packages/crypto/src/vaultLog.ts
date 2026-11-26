@@ -1,6 +1,15 @@
 import { sha256 } from '@noble/hashes/sha2.js';
 
-import { Canonical } from './canonical.ts';
+import { isUuid } from './bytes.ts';
+import {
+  Canonical,
+  isOptionalBytes32,
+  isFlag,
+  isOptionalUuid,
+  isStr,
+  isU32,
+  isU64,
+} from './canonical.ts';
 import { LABELS } from './labels.ts';
 import { sign } from './signatures.ts';
 
@@ -89,6 +98,38 @@ export interface LogEntryFields {
  */
 export function roleIncludes(role: Role | undefined, needed: Role): boolean {
   return role !== undefined && ROLE_CODE[role] >= ROLE_CODE[needed];
+}
+
+/**
+ * Tells whether every field of an entry fits its type in the canonical encoding (`PROTOCOL.md`
+ * §3), so that {@link logMessage} encodes it: UUIDs, 32-byte values, `u32` and `u64` numbers in
+ * range, a known kind and role, a boolean `requestEnd`, and well-formed strings. Fields typed by
+ * the compiler may still hold anything a server sent, so a reader checks before it encodes.
+ *
+ * @param entry Entry fields, as served.
+ * @returns Whether the entry has a canonical message.
+ */
+export function isWellFormedLogEntry(entry: LogEntryFields): boolean {
+  return (
+    isUuid(entry.vaultId) &&
+    isU64(entry.seq) &&
+    isOptionalBytes32(entry.previousHash) &&
+    Object.hasOwn(KIND_CODE, entry.kind) &&
+    isOptionalUuid(entry.subjectUserId) &&
+    (entry.role === undefined || Object.hasOwn(ROLE_CODE, entry.role)) &&
+    isU32(entry.keyVersion) &&
+    isOptionalBytes32(entry.subjectKeys) &&
+    (entry.subjectKeyVersion === undefined || isU32(entry.subjectKeyVersion)) &&
+    isOptionalBytes32(entry.keyCommitment) &&
+    isOptionalBytes32(entry.checkpoint) &&
+    isFlag(entry.requestEnd) &&
+    isUuid(entry.authorUserId) &&
+    isU32(entry.authorKeyVersion) &&
+    isOptionalUuid(entry.nodeId) &&
+    isOptionalUuid(entry.homeVaultId) &&
+    isStr(entry.nodeKey ?? '') &&
+    isStr(entry.sections ?? '')
+  );
 }
 
 /**

@@ -1,7 +1,7 @@
 import { sha256 } from '@noble/hashes/sha2.js';
 
-import { equalBytes } from './bytes.ts';
-import { Canonical } from './canonical.ts';
+import { equalBytes, isUuid } from './bytes.ts';
+import { Canonical, isBytes32, isU32, isU8 } from './canonical.ts';
 import { toFingerprintCode } from './codes.ts';
 import { LABELS } from './labels.ts';
 
@@ -22,6 +22,26 @@ export interface PublicKeys {
   readonly signingPublicKey: Uint8Array;
   /** Raw Ed25519 public key of the recovery signing key, which signs only the next version. */
   readonly recoverySigningPublicKey: Uint8Array;
+}
+
+/**
+ * Tells whether every field of a key version fits its type in the canonical encoding
+ * (`PROTOCOL.md` §3), so that {@link fingerprintMessage} and {@link keysDigest} encode it: a
+ * lowercase UUID, a `u8` suite, a `u32` version and three 32-byte keys. Whether the keys are usable
+ * is a separate check.
+ *
+ * @param keys The key version, as served.
+ * @returns Whether it has a fingerprint message.
+ */
+export function isWellFormedKeys(keys: PublicKeys): boolean {
+  return (
+    isUuid(keys.userId) &&
+    isU8(keys.cryptoSuite) &&
+    isU32(keys.keyVersion) &&
+    isBytes32(keys.encryptionPublicKey) &&
+    isBytes32(keys.signingPublicKey) &&
+    isBytes32(keys.recoverySigningPublicKey)
+  );
 }
 
 /**

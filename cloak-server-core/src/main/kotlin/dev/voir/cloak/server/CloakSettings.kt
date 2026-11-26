@@ -24,9 +24,11 @@ import java.time.Duration
  * @property maxStoredSectionsPerVault Most sections one vault stores, deletions included: a deletion
  *   is kept without content so the section's next write chains to it (`PROTOCOL.md` §7.5). Bounds
  *   the database; never below [Limits.MAX_SECTIONS_PER_VAULT].
- * @property writePause How long a write pause holds a vault (`PROTOCOL.md` §7.5).
+ * @property writePause How long a write pause holds a vault (`PROTOCOL.md` §7.5), unless it ends
+ *   sooner: whole seconds, 1 second to 10 minutes.
  * @property writePauseInterval Least time between two pauses of one vault by the same member who is
- *   not an admin, renewals included, so no member can keep a vault paused.
+ *   not an admin, renewals included, so no member can keep a vault paused: whole seconds, from the
+ *   write pause to a day.
  * @property maxPendingInvitations Most vaults a user may be added to without accepting them
  *   (`PROTOCOL.md` §12.4); adding one more answers `too_many_invitations`.
  * @property maxPendingInvitationsPerInviter Most of those one person may have added the user to,
@@ -193,9 +195,9 @@ public class CloakSettings private constructor(
          * @return The settings.
          * @throws IllegalArgumentException when [maxRequestBytes] is below [Limits.MIN_REQUEST_BYTES],
          *   a timeout is not positive or is longer than a day, the checkpoint statement timeout is
-         *   shorter than the ordinary one, the stored section limit is below the live one, or the
-         *   write pause is not between 1 second and 10 minutes and its interval not at least as long,
-         *   or the pending invitation limit is not positive.
+         *   shorter than the ordinary one, the stored section limit is below the live one, the write
+         *   pause is not whole seconds between 1 second and 10 minutes, its interval is not whole
+         *   seconds between the pause and a day, or a pending invitation limit is not positive.
          */
         public fun build(): CloakSettings {
             require(maxRequestBytes >= Limits.MIN_REQUEST_BYTES) {

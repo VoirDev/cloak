@@ -8,8 +8,12 @@
 #   DEFAULT_BRANCH     the pull request's base
 #   RELEASE_BOT_NAME   author of the release commit
 #   RELEASE_BOT_EMAIL  its email address
-#   GH_TOKEN           the release bot's token, for gh; a pull request opened with the workflow's own
-#                      token would start no workflow, so Verify would never check the release
+#   GH_TOKEN           the release bot's token, for gh and for the push, which uses it in an explicit
+#                      URL because the checkout keeps no credentials; a pull request opened or a branch
+#                      pushed with the workflow's own token would start no workflow, so Verify would
+#                      never check the release
+#   GITHUB_SERVER_URL  GitHub's URL, set by Actions
+#   GITHUB_REPOSITORY  owner/name of this repository, set by Actions
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 source ci/release/common.sh
@@ -18,12 +22,13 @@ require_semver "${RELEASE_VERSION:-}"
 : "${RELEASE_BRANCH:?}" "${DEFAULT_BRANCH:?}" "${RELEASE_BOT_NAME:?}" "${RELEASE_BOT_EMAIL:?}" "${GH_TOKEN:?}"
 tag="v$RELEASE_VERSION"
 title="Release $tag"
+remote="$(authenticated_remote "$GH_TOKEN")"
 
 git config user.name "$RELEASE_BOT_NAME"
 git config user.email "$RELEASE_BOT_EMAIL"
 
 echo "==> Commit and push $RELEASE_BRANCH"
-if git ls-remote --exit-code --heads origin "refs/heads/$RELEASE_BRANCH" >/dev/null; then
+if git ls-remote --exit-code --heads "$remote" "refs/heads/$RELEASE_BRANCH" >/dev/null; then
   # Apply the same edit on the existing branch; whatever else is on it stays.
   git checkout --quiet -- .
   git checkout --quiet -B "$RELEASE_BRANCH" "origin/$RELEASE_BRANCH"
@@ -39,7 +44,7 @@ if git diff --cached --quiet; then
 else
   git commit --quiet --message "$title"
 fi
-git push --quiet origin "HEAD:refs/heads/$RELEASE_BRANCH"
+git push --quiet "$remote" "HEAD:refs/heads/$RELEASE_BRANCH"
 
 echo "==> Open or update the release pull request"
 body="$(

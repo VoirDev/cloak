@@ -329,6 +329,40 @@
       "reason": "bad_statement"
     }
   ],
+  "encryptionKeys": [
+    {
+      "key": "e676f99b4df540daf02f5a7c1c0eeed65a44f3236ffed351a56153d8b7e9882b",
+      "reason": null
+    },
+    {
+      "key": "0000000000000000000000000000000000000000000000000000000000000000",
+      "reason": "small_order_key"
+    },
+    {
+      "key": "0100000000000000000000000000000000000000000000000000000000000000",
+      "reason": "small_order_key"
+    },
+    {
+      "key": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+      "reason": "small_order_key"
+    },
+    {
+      "key": "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+      "reason": "small_order_key"
+    },
+    {
+      "key": "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+      "reason": "small_order_key"
+    },
+    {
+      "key": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+      "reason": "non_canonical_key"
+    },
+    {
+      "key": "e676f99b4df540daf02f5a7c1c0eeed65a44f3236ffed351a56153d8b7e988ab",
+      "reason": "non_canonical_key"
+    }
+  ],
   "userNamespace": "715ec4b7-23ef-5724-a2a7-6bd5871ab13d",
   "userIds": [
     {
@@ -483,6 +517,58 @@
       ],
       "message": "001a636c6f616b2f76312f6964656e746974792d64656c6574696f6e0192f5a47c3e7b1a9d2e5f6a7b8c9d0e0000000200000003000000006adf0240",
       "signature": "019554f4c4bc4ce77efd1fd60fb49276cb2e1bea9307a81728d18431262c39dfab1b86394918098e579aee1db2499f3f8bcdc37f7fa26179be29e5ef9f4d348107"
+    }
+  },
+  "acceptances": {
+    "signer": {
+      "userId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e",
+      "keyVersion": 2
+    },
+    "vault": {
+      "vaultId": "0192f5a3-0000-7aaa-8bbb-0123456789ab",
+      "fields": [
+        {
+          "type": "label",
+          "value": "cloak/v1/vault-acceptance"
+        },
+        {
+          "type": "uuid",
+          "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e"
+        },
+        {
+          "type": "u32",
+          "value": 2
+        },
+        {
+          "type": "uuid",
+          "value": "0192f5a3-0000-7aaa-8bbb-0123456789ab"
+        }
+      ],
+      "message": "0019636c6f616b2f76312f7661756c742d616363657074616e63650192f5a47c3e7b1a9d2e5f6a7b8c9d0e000000020192f5a300007aaa8bbb0123456789ab",
+      "signature": "015ff24c0927e260f3025e2c5093418c15f40a10cc4a36313e79bdda3dc895bbfb4d206294cd832a5de5f3ac5999f145ea6e016f3c14c7c85575b711e98b26fd0b"
+    },
+    "inviter": {
+      "inviterUserId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d1f",
+      "fields": [
+        {
+          "type": "label",
+          "value": "cloak/v1/inviter-acceptance"
+        },
+        {
+          "type": "uuid",
+          "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e"
+        },
+        {
+          "type": "u32",
+          "value": 2
+        },
+        {
+          "type": "uuid",
+          "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d1f"
+        }
+      ],
+      "message": "001b636c6f616b2f76312f696e76697465722d616363657074616e63650192f5a47c3e7b1a9d2e5f6a7b8c9d0e000000020192f5a47c3e7b1a9d2e5f6a7b8c9d1f",
+      "signature": "01a3b80dc2e033a1f7ea44db667cac8a3b43ef386b7052e946a723d2ba666ec666d1e17eeb308cb989cd892bd7a42322cc2d2952c7290596912ed9806e980d3405"
     }
   }
 }

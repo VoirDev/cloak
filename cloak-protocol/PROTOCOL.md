@@ -65,9 +65,12 @@ is its 16 uuid bytes.
 
 **Ed25519 is verified strictly** as RFC 8032 §5.1.7 says, without the ZIP-215 relaxations: `S`
 must be below the group order, `R` and `A` must be canonical encodings, and the equation is the
-cofactorless one. Public keys of small order are refused by the server when registered and by every
-client when used. Every implementation must refuse the same signatures; the vectors include the
-edge cases.
+cofactorless one: `[S]B − [k]A` must encode to exactly the bytes of `R`, with
+`k = SHA-512(R ‖ A ‖ message) mod L`. An encoding is canonical when its `y` is below p and its sign
+bit is clear wherever `x` is 0, which is the case only for `y` = 1 and `y` = p − 1. A cofactored
+check would accept an `R`, or a key, with a small-order part, which this one refuses. Public keys
+of small order are refused by the server when registered and by every client when used. Every
+implementation must refuse the same signatures; the vectors include the edge cases.
 
 The suite number is stored per identity (`cryptoSuite`). A future suite adds new values; it never
 changes these.
@@ -88,6 +91,10 @@ A canonical message is a concatenation of fields, with no separators:
 | `uuid`              | 16 bytes in RFC 9562 order (the hex digits of the canonical form). An absent id is the nil UUID, 16 zero bytes |
 | `key32`, `digest32` | Exactly 32 raw bytes. An absent value is 32 zero bytes                                                         |
 
+A `str` is well-formed Unicode: a string with a lone surrogate has no UTF-8 encoding, and an
+encoder that wrote U+FFFD for it would give two different strings the same bytes, so every encoder
+and verifier refuses one.
+
 Byte ranges such as `digest[0..20]` are half-open: bytes 0 to 19. The label gives every message
 its own domain, so a signature or ciphertext made for one purpose can never be accepted for
 another. Real ids and keys are random, so a nil UUID or a zero value never collides with a present
@@ -96,15 +103,16 @@ fields a kind sets, every other field must be absent; a verifier refuses one tha
 
 Enumerations (0 means absent where a field is optional):
 
-| Name           | Values                                                                                                                              |
-| -------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| Role           | `viewer` = 1, `editor` = 2, `admin` = 3, `owner` = 4                                                                                |
+| Name           | Values                                                                                                                                                                                                                |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Role           | `viewer` = 1, `editor` = 2, `admin` = 3, `owner` = 4                                                                                                                                                                  |
 | Log entry kind | `vault_created` = 1, `member_added` = 2, `member_role_set` = 3, `member_removed` = 4, `member_keys_replaced` = 5, `key_rotated` = 6, `node_created` = 7, `node_shared` = 8, `node_unshared` = 9, `vault_deleted` = 10 |
 
 ## 4. Blob formats
 
 Every binary value a client sends starts with a one-byte format version. The server checks this
-byte and the length, and stores the rest without parsing it. Format 1 is the only format today.
+byte and the length, and stores the rest without parsing it. This version of the protocol defines
+format 1; the server refuses a blob of any other format (`unsupported_format`).
 
 | Blob           | Layout (format 1)                           | Size           |
 | -------------- | ------------------------------------------- | -------------- |
@@ -161,6 +169,13 @@ Each user has three key pairs:
 The three public keys have an **identity key version**: 1 at registration and one more at each
 replacement.
 
+Every public key must be usable before anyone relies on it; the server refuses others when they
+are registered, and every client refuses a key statement that carries one. The two Ed25519 keys
+are checked as §2 says. The X25519 key must have its top bit clear, a u-coordinate below p, and
+not be one of the five points of small order (u = 0, 1, p − 1, and the two points of order 8):
+sealing to such a key fails or gives a secret everyone knows, and a member with one would make
+every rotation that keeps them fail.
+
 ```text
 fingerprintMessage = label "cloak/v1/fingerprint" ‖ uuid userId ‖ u8 cryptoSuite ‖ u32 keyVersion
                      ‖ key32 encryptionPublicKey ‖ key32 signingPublicKey
@@ -194,8 +209,8 @@ does not replace it: the client keeps what it trusts and raises a key alarm (§9
 
 A random 16-byte **secret key** is generated at registration and never sent to the server. It
 lives on each device (keychain or secure storage) and is shown once as a code (§10). A new device
-needs it, typed in or scanned from a logged-in device; scanning also carries that device's pins and
-verified vault heads (§15).
+needs the code typed in; a device that keeps the secret key afterwards unlocks with the password
+alone.
 
 ```text
 passwordKey       = Argon2id(UTF-8(NFKC(password)), salt, memoryKib, iterations, parallelism = 1, length = 32)
@@ -275,7 +290,11 @@ When identity keys may have leaked, the user, with the recovery key in hand:
 5. shows, per vault, the log entries signed with the old keys that this device did not sign (its
    own entries, §15), for the user to review. Another device of the user may have made them;
    otherwise the holder of the old keys did. Nothing undoes them automatically: an admin reverts
-   unwanted member changes and rotates.
+   unwanted member changes and rotates;
+6. signs again, with version n + 1, every acceptance (§9) this device signed itself (its own
+   acceptances, §15), and shows the vaults whose acceptance the old keys signed without it. An
+   acceptance counts only at the user's current version, so the old keys can no longer make a
+   vault vouch for anyone; the user accepts those vaults again, or not.
 
 A client that sees a user committed at a superseded version in any vault (§7.6) shows it, and the
 user's own client then repeats step 3 there.
@@ -286,24 +305,40 @@ Deleting an identity erases what unlocks it: both bundles, the KDF parameters an
 Its key statements stay, because the log entries and writes it signed name them and members still
 verify those. What it signed stays valid: deletion does not revoke keys (§16).
 
-- **By the user.** The client empties the account first: it deletes every vault where the user is
-  the only member, leaves every other one (§12.4), and stops while the user is the only owner of a
-  vault that has other members, until another owner is appointed. Then it signs
-  `label "cloak/v1/identity-deletion" ‖ uuid userId ‖ u32 keyVersion ‖ u32 credentialsVersion ‖
-  u64 notAfter` with the current signing key, where `credentialsVersion` is the current one and
-  `notAfter` a Unix time in seconds at most 10 minutes ahead, and sends it to
-  `POST /identity/deletion`. The server refuses a statement past `notAfter` or further ahead, so a
-  captured one cannot be sent again later, and refuses with `identity_in_vaults` while the user is
-  still a member of a vault that is not deleted and that they accepted; then the client clears the
-  user's local state (§15). Vaults they never accepted do not hold the deletion up: their
-  envelopes go, and their admins remove the deleted member as after a host's erasure. A refused
-  statement stays valid until `notAfter`; the window is short so that whoever holds only the host's
-  session can at most repeat what the user just asked for. A deletion is never made from the host's session alone.
+- **By the user.** The client empties the account first, among the vaults the user accepted: it
+  deletes every vault where the user is the only member, leaves every vault where another member is
+  not marked deleted (§12.4), and does neither in a vault whose other members the server all marks
+  deleted, which the rule below removes. It decides every vault before it changes any, and changes
+  nothing while, in a vault with other members not marked deleted, the user is the only owner not
+  marked deleted, until another owner is appointed. Then it signs, with the current signing key,
+
+  ```text
+  label "cloak/v1/identity-deletion" ‖ uuid userId ‖ u32 keyVersion ‖ u32 credentialsVersion
+  ‖ u64 notAfter
+  ```
+
+  where `credentialsVersion` is the current one and `notAfter` a Unix time in seconds at most 10
+  minutes ahead, and sends it to `POST /identity/deletion`. The server refuses a statement past
+  `notAfter` or further ahead, so a captured one cannot be sent again later, and refuses with
+  `identity_in_vaults` while the user is still a member of a vault that is not deleted, that they
+  accepted, and that has another member who is not a deleted identity; then the client clears the
+  user's local state (§15). Vaults they never accepted do not hold the deletion up: their envelopes
+  go, and their admins remove the deleted member as after a host's erasure. A refused statement
+  stays valid until `notAfter`; the window is short so that whoever holds only the host's session
+  can at most repeat what the user just asked for. A deletion is never made from the host's
+  session alone.
+
 - **By the host**, for a user who cannot or will not do it, such as on an erasure request or a
-  closed account: the server erases the identity as above, removes the vault-key envelopes sealed to
-  it, and deletes the vaults where the user was the only member. Nobody can sign for the user, so
-  their memberships stay in the logs: members see them marked deleted, and an admin removes them
-  with a rotation.
+  closed account: the server erases the identity as above and removes the vault-key envelopes
+  sealed to it. Nobody can sign for the user, so their memberships stay in the logs: members see
+  them marked deleted, and an admin removes them with a rotation.
+
+Either way, the server deletes every vault of the user in which no member is left who is not a
+deleted identity, accepted or not, as the host deletes a vault (§12.3): nobody could act on it
+again. A host's erasure of an identity already deleted does it again, for the vaults left that way
+since. Whether a member is deleted is the server's unsigned word, so a client signs no
+`vault_deleted` for a vault whose other members are marked deleted and leaves it to this rule. The
+removal is the server's word too, and only takes availability (§16).
 
 A deleted identity can do nothing. The server answers every request it makes with
 `identity_deleted`, refuses to add it to a vault or deliver it an envelope, and refuses to register
@@ -480,13 +515,17 @@ rising; it does not count against the vault's section limit, which bounds live s
 every checkpoint.
 
 A checkpoint has at most one leaf per section; its author and every reader refuse a leaf list or
-proof that names a section twice.
+proof that names a section twice. A reader refuses the log at an entry whose leaf list does so
+(`bad_checkpoint`), even when the list gives the signed root.
 
 The server keeps every checkpoint's leaf list, with its size, and serves it two ways:
 
 - **proofs:** for up to 100 sections at once, each against any checkpoint of the vault, the
   section's leaf with its RFC 6962 audit path, the leaf index and the tree size, or the two
-  neighbouring leaves with theirs to show it was absent;
+  neighbouring leaves with theirs to show it was absent. The checkpoints one request names hold
+  at most a vault's limit of live sections together, so a request costs the server no more than
+  one checkpoint; the log signs a checkpoint's root, not its size, so a client learns a size from a
+  verified proof or leaf list, and asks about a checkpoint of unknown size on its own;
 - **leaves:** the whole leaf list in checkpoint order, in pages. A client that reads all of it
   recomputes the root, which must equal the signed checkpoint, and from then on knows what the
   checkpoint holds for every section of the vault without a proof.
@@ -496,19 +535,26 @@ when it checks many. A checkpoint is immutable, so what a client verified about 
 
 **Write pause.** The server takes a checkpoint only if it equals the stored latest writes, so a
 member who keeps writing could make every attempt fail. Before it sends a request with a
-checkpoint, a client may ask the server to pause section writes to the vault for a few seconds; it
-builds the checkpoint beforehand, takes the pause, reads only what changed since, and sends. The server
+checkpoint, a client may ask the server to pause section writes to the vault; it builds the
+checkpoint beforehand, takes the pause, reads only what changed since, and sends. The server
 cannot tell why a member pauses, so any editor may; an admin's pause takes the place of anyone
 else's, a pause by anyone else never does, and each member below admin may pause a vault only once
 in a while, so one editor cannot keep others from pausing for their own departure or key
 replacement. Members who keep pausing together delay others; admins remove them. A pause ends
-when the paused request is applied or its time runs out. Writes during a pause answer `busy` with the time left, and writers send them again. The pause is the server's help, not a
-rule: nothing a client accepts depends on it.
+when a request of its holder that carries a checkpoint for the vault is applied, when its holder
+releases it, or when its time runs out: 30 seconds unless the host sets another, from 1 second to
+10 minutes. Every section write to the vault during a pause, its holder's too, answers `busy` with
+a `Retry-After` of the time left, at most 2 seconds, since a pause usually ends well before it runs
+out, and writers send it again. The pause is the server's help, not a rule: nothing a client
+accepts depends on it.
 
 ### 7.6 Verifying the log
 
 A member reads the log from `seq` 1, or from the head of a verified snapshot it keeps (§15), and
-for each entry checks:
+for each entry first refuses one with a field outside the range of its type in §3 (`malformed`): a
+`u32` of 2^32 or more, a key or digest that is not 32 bytes, an unknown kind or role, a string that
+is not well-formed or longer than 65 535 bytes, or such a field in a leaf the member holds for the
+entry's checkpoint. Such an entry has no canonical message. Then it checks:
 
 1. `seq` and `previousHash` continue the chain, and `entryHash` matches the message;
 2. the signature, against the author's public keys of `authorKeyVersion`, whose `keysDigest` is the
@@ -651,8 +697,9 @@ and a first write in the new one.
 A write **stands** when its header passes these rules:
 
 1. **Head.** `logSeq` and `logHeadHash` are a head in the verified log; if the reader's log is
-   shorter it reads and verifies the rest first; if the log has another hash at `logSeq` it
-   refuses with `fork`.
+   shorter it reads and verifies the rest first. If the log has another hash at `logSeq` it
+   refuses with `fork`, whether or not that entry is a head: that is evidence of a fork, and comes
+   before `not_a_head`.
 2. **Key version.** `vaultKeyVersion` is the vault's key version at `logSeq`, and the write has
    a `ciphertextHash` unless it is a deletion.
 3. **Writer.** The signature verifies with the writer's keys of `writerKeyVersion`, which were
@@ -680,8 +727,9 @@ A write **stands** when its header passes these rules:
    nothing to read, so it may go wherever its writer may write, but it still names its node
    truthfully.
 
-A reader first refuses every write of a vault whose log ends in `vault_deleted` (`vault_deleted`),
-then applies the rules in the order 1, 2, 3, 6, 4, and refuses with the first that fails; rule 5 follows, against the
+A reader first refuses a header with a field outside the range of its type in §3 (`malformed`), as
+for log entries (§7.6), then every write of a vault whose log ends in `vault_deleted`
+(`vault_deleted`), then applies the rules in the order 1, 2, 3, 6, 4, and refuses with the first that fails; rule 5 follows, against the
 device's marks, and only a write that stands raises a mark.
 
 A member **reads** a write that stands when, in addition, its ciphertext hashes to
@@ -700,11 +748,31 @@ verifies an entry about or by them or reads their writes, and follows their key 
 there (§5.2). A different key for a pinned version, or a second statement for a version it trusts,
 is a **key alarm**: the client keeps what it trusts and shows both fingerprints.
 
-A client adds a person it has not pinned only with a fingerprint the user confirmed out of band, by
-scanning or comparing it. Without that, the first time a person is added the server could hand over
-its own keys under their name; the vault log would then commit those keys for everyone. Before
-adding or changing a member, the client fetches their latest key statements and uses their newest
-version.
+A client pins only after the entry verifies or the write stands. The keys the server serves for a
+person named in something that does not verify are used to check it and nothing else.
+
+A client adds a person only when their pin is **vouched for**: the user confirmed their fingerprint
+out of band, by scanning or comparing it, or the verified log of a vault that **vouches** commits
+their keys. Without that, the first time a person is added the server could hand over its own keys
+under their name; the vault log would then commit those keys for everyone. A vault vouches when
+the user accepted it: its view carries an acceptance the user signed with their current key
+version, either of the vault itself,
+
+```text
+vaultAcceptance   = label "cloak/v1/vault-acceptance" ‖ uuid userId ‖ u32 keyVersion ‖ uuid vaultId
+```
+
+or of the person whose `member_added` (or, for its creator, `vault_created`) made the user a
+member, which accepts every vault that person adds them to:
+
+```text
+inviterAcceptance = label "cloak/v1/inviter-acceptance" ‖ uuid userId ‖ u32 keyVersion
+                    ‖ uuid inviterUserId
+```
+
+A vault the server made under an account of its own, and added the user to unasked, so vouches for
+nobody. An acceptance signed with an older key version vouches for nothing (§5.6). Before adding or
+changing a member, the client fetches their latest key statements and uses their newest version.
 
 A confirmed fingerprint must be on the person's verified key chain from version 1; the client then
 pins version 1 and follows the chain, so confirming a later version does not skip the statements
@@ -732,11 +800,12 @@ The checksum bytes catch typos before any network call.
 All signatures are Ed25519, verified strictly (§2), over a canonical message, sent as a signature
 blob.
 
-| Message               | Signer                                                                                            |
-| --------------------- | ------------------------------------------------------------------------------------------------- |
-| `keyStatement` (§5.2) | The version's signing key; for version 2 and up, also the previous version's recovery signing key |
-| `logMessage` (§7.1)   | The author, as §7.2 says                                                                          |
-| `sectionWrite` (§8.2) | The writer, as §8.3 and §8.4 say                                                                  |
+| Message                                     | Signer                                                                                            |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `keyStatement` (§5.2)                       | The version's signing key; for version 2 and up, also the previous version's recovery signing key |
+| `logMessage` (§7.1)                         | The author, as §7.2 says                                                                          |
+| `sectionWrite` (§8.2)                       | The writer, as §8.3 and §8.4 say                                                                  |
+| `vaultAcceptance`, `inviterAcceptance` (§9) | The accepting user's current signing key                                                          |
 
 The server verifies every signature before storing anything and refuses `bad_signature`. Clients
 verify again on read, because the server is not trusted.
@@ -748,7 +817,10 @@ verify again on read, because the server is not trusted.
 1. Generate the encryption and signing key pairs, a 16-byte secret key, a 16-byte salt, a 32-byte
    recovery key and a 32-byte `localStateKey`.
 2. Derive `masterKey`, build both bundles and the version-1 key statement.
-3. `POST /identity`. Show the secret key and recovery key codes once.
+3. Show the secret key and recovery key codes once, before anything is sent, then
+   `POST /identity`. A request whose response is lost may have been applied; when the client gets
+   no response or `already_exists`, it reads `GET /identity` and counts the registration as done
+   when the server holds exactly its keys (the same version and `keysDigest`).
 
 ### 12.2 Unlock
 
@@ -760,15 +832,16 @@ verify again on read, because the server is not trusted.
 ### 12.3 Vaults
 
 - **Create:** generate a vault id, key and commitment; seal the key to oneself; sign
-  `vault_created`; `POST /vaults`.
+  `vault_created` and the `vaultAcceptance` of the new vault; `POST /vaults`.
 - **Delete:** an owner signs `vault_deleted` and sends it to `POST /vaults/{id}/deletion`. The
   server removes the vault's keys, envelopes, sections and checkpoint leaves, and keeps its log and
   member list, so every member who verifies the log sees who deleted it and forgets it (§15); only
   those members may read it. Nothing can follow `vault_deleted` in the log, and it is not a head
   a write may cite. A deleted vault's members are no longer members anywhere: they do not hold up
   the deletion of their accounts, and the host does not count them. Someone with the host's session
-  alone cannot delete a vault. The host itself still can, as when it erases a user (§5.7); that is unsigned, like any loss of
-  availability (§16).
+  alone cannot delete a vault. The host itself still can, as when an identity's deletion leaves a
+  vault with no member who is not deleted (§5.7); that is unsigned, like any loss of availability
+  (§16).
 
 ### 12.4 Members
 
@@ -779,11 +852,14 @@ verify again on read, because the server is not trusted.
 - **Leave:** sign `member_removed` with oneself as subject, with a checkpoint if one was an editor or
   stronger.
 - **Accept:** a person added to a vault is a member at once, by the log, but the server lists the
-  vault for them, and counts them for the host's access checks, only once they accept it, or accept
-  everything from the person who added them. A person can hold only so many vaults they have not
-  accepted, in all and from any one inviter, so nobody can fill another's list. This is the
-  server's help against being added to vaults unasked, not a rule a client checks: the log alone
-  decides what a member may read and write.
+  vault for them, and counts them for the host's access checks, only once they accept it, signing
+  its `vaultAcceptance`, or accept everything from the person who added them, signing an
+  `inviterAcceptance`, which the server takes only for a registered person who is not deleted. A
+  person can hold only so many vaults they have not accepted, in all and
+  from any one inviter, so nobody can fill another's list. The server keeps each acceptance and
+  returns it with the vault's view, so every device of the user learns which vaults vouch (§9).
+  Signing again with a newer key version replaces it. Acceptance never decides what a member may
+  read and write: the log alone does.
 - **Share a node into another vault:** the node's owner, as an admin of that vault, signs
   `node_shared` with the names to share (§7.7); taking them back is `node_unshared`. A name taken
   back is no longer read there, but whoever read it keeps what they saw.
@@ -815,11 +891,18 @@ writer judges that answer against its marks (§15) exactly as a single read. A c
 a vault's replica current with `GET /vaults/{id}/sections?afterChange=…`, which returns every
 section whose latest write is newer, deletions included. `GET /vaults/{id}/section-headers` lists
 the same writes as headers (§8.2), in larger pages, for checking standing without the content.
-Write responses echo the stored header.
+Write responses echo the stored header. `GET /nodes/{id}` reads a node's sections across one's
+vaults, by vault and section name, with a cursor; `POST /nodes/batch-get` reads up to 100 nodes
+sharing one page. Every response that carries ciphertext holds whole sections, at least one, up to
+a page of them and a page's budget of ciphertext (`GET /meta`), and a reader refuses one that
+holds more.
 
 ### 12.6 Replace identity keys
 
-As §5.6 says.
+As §5.6 says. The client shows the new secret key and recovery key codes before it sends
+`PUT /identity/keys`, as at registration (§12.1); when it gets no response or
+`identity_version_conflict`, it reads `GET /identity` and goes on with step 3 when the server holds
+exactly the new keys.
 
 ### 12.7 Delete an account
 
@@ -833,7 +916,8 @@ For every request the server, which holds no keys, checks:
   signature 65; envelope 81; previous-key wrap 73; commitments, checkpoints and digests 32;
 - every signature, by rebuilding the canonical message from the request fields, the stored log
   head and the SHA-256 of each blob, against the stored public keys of the named version;
-- every key statement chains to the user's current version and is signed as §5.2 says;
+- every key statement chains to the user's current version and is signed as §5.2 says, and an
+  identity holds at most 100 key versions, so every chain a reader checks stays bounded;
 - every log entry exactly as a member checks it (§7.6), every request shape (§7.3), and that the
   request matches what it does: an envelope for every member a rotation keeps whose version is not
   superseded and who is not deleted, none for any other, and a checkpoint equal to the root over the stored latest writes
@@ -852,16 +936,20 @@ For every request the server, which holds no keys, checks:
 - nothing is appended after `vault_deleted`;
 - a new private key bundle carries a `credentialsStatement` signed with the user's current keys,
   and an identity deletion is signed the same way (§5.4, §5.7);
+- a new vault carries its creator's `vaultAcceptance`, every acceptance is signed with the
+  caller's current keys (§9), and an accepted inviter is a registered identity that is not deleted;
 - `credentialsVersion` and the identity key version as the API describes;
 - the caller is not a deleted identity, and neither is a member being added or sent an envelope
   (§5.7);
 - the request fits the server's request size limit, which is never below what the largest
   rotation and the largest checkpoint need, so taking access away always fits in one request.
 
-The server applies each request in one transaction. Every request that changes a vault, log
-appends and section writes alike, locks the vault exclusively, several vaults in id order: a
-checkpoint covers exactly the writes stored before it, and a vault's change numbers commit in
-order, so a client reading `afterChange` never skips a write.
+The server applies each request in one transaction. Every request first locks its caller's
+identity in shared mode, and an identity's deletion locks it exclusively, so a deletion waits for
+the user's requests in progress and none starts until it ends. Then every request that changes a
+vault, log appends and section writes alike, locks the vault exclusively, several vaults in id
+order: a checkpoint covers exactly the writes stored before it, and a vault's change numbers commit
+in order, so a client reading `afterChange` never skips a write.
 
 ## 14. Label registry
 
@@ -884,6 +972,8 @@ order, so a client reading `afterChange` never skips a write.
 | `cloak/v1/node`                | Name of a node's UUIDv5 id                                 |
 | `cloak/v1/credentials`         | Signature: a new private key bundle                        |
 | `cloak/v1/identity-deletion`   | Signature: deleting one's identity                         |
+| `cloak/v1/vault-acceptance`    | Signature: accepting a vault                               |
+| `cloak/v1/inviter-acceptance`  | Signature: accepting everything from one person            |
 | `cloak/v1/local-state`         | HKDF info and AD: a client's local state (§15); never sent |
 
 A label is never reused for another purpose. A new purpose gets a new label.
@@ -892,7 +982,12 @@ A label is never reused for another purpose. A new purpose gets a new label.
 
 A member's client keeps, per user and device:
 
-- **pins and key chains:** each person's pinned and newest verified key versions (§9);
+- **pins and key chains:** each person's pinned and newest verified key versions, and whether the
+  pin is vouched for (§9);
+- **vouching vaults:** the vaults whose acceptance this device verified, so it vouches for the
+  members of a vault the first time it accepts it, and for those its later entries add;
+- **own acceptances:** the vaults and inviters this device signed an acceptance of, to sign again
+  after a key replacement (§5.6 step 6);
 - **vault snapshots:** for each vault, the verified state, so later sessions verify only new
   entries: per entry its `seq`, `entryHash`, whether it is a head, the key version after it and its
   author with their key version; each member's role and committed keys as they changed, by `seq`;
@@ -920,8 +1015,13 @@ A member's client keeps, per user and device:
 - **forgotten vaults:** the verified head of each vault whose records the client dropped.
 
 The records of a vault are dropped only on a signed fact: its verified log ends in
-`vault_deleted`, the user left it, or the log removes them. The client then keeps the vault's verified head as a forgotten vault,
-and a log it is shown later must pass through that head (§7.6). A vault the server stops listing,
+`vault_deleted`, the user left it, or the log removes them. A server's answer to a request is not
+such a fact: a client that deletes a vault reads its log again and drops the records only once the
+log holds its `vault_deleted`. The client then keeps the vault's verified head as a forgotten vault,
+and a log it is shown later must pass through that head (§7.6). A former member can no longer read
+the log, so a client that left keeps as that head its own signed `member_removed`, which continues
+the head it verified: a server that only claimed to apply the departure shows a log without it,
+which is refused as a rollback. A vault the server stops listing,
 or answers `not_found` for, is not forgotten on its own: the server could hide it now and show an
 older history later. An app may still forget one on the user's say-so, which leaves the device as
 new for that vault. Deleting the account (§5.7), or signing the user out of the device for good,
@@ -952,8 +1052,9 @@ than a new one. A client raises what it keeps only after the signatures behind i
   server, act as admin: rotate to a key they choose, add members, write content the device accepts.
   The device writes under that key. The branch shows only when the device reads a write made on the
   real history, which the server may never serve it. Nothing in the protocol closes this.
-- **First contact.** A person added without a pin or a confirmed fingerprint may get the server's
-  keys instead of their own (§9).
+- **First contact.** A person added on the word of a vault that vouches, without a confirmed
+  fingerprint, gets the keys that vault's log commits for them: as trustworthy as its admins, who
+  may have added them under the server's keys (§9).
 - **Checkpoints.** A section the server hides from a checkpoint's author is left out of it. Its
   current write then stops being accepted, whoever wrote it, until someone writes it again. Content
   is hidden, never forged.
@@ -966,7 +1067,11 @@ than a new one. A client raises what it keeps only after the signatures behind i
 - **What is not signed.** Every change that gives access, moves a secret or destroys data is
   signed by a member's keys. The rest is the server's word and can only do less: hiding a section
   or a vault, the deletion mark of a user, envelope delivery (which fails if wrong), write pauses,
-  accepting vaults, and what the host deletes itself, such as erasing a user or purging a node.
+  which vaults the server lists as accepted, and what the host deletes itself, such as erasing a
+  user or purging a node. Which vaults vouch for people's keys is signed (§9).
+- **Availability.** The server can withhold or delete anything it stores. Signatures show that
+  what it serves is genuine, never that it serves all of it. Cloak keeps no copy of its own, and a
+  server restored from an older backup is a rollback to its clients (§15).
 - **Deletion.** Deleting an identity does not revoke its keys: what it signed stays valid, and
   whoever holds them keeps knowing the vault keys they knew until admins remove the person and
   rotate. A deletion for a leak is a key replacement (§5.6) or a removal, not a deletion.

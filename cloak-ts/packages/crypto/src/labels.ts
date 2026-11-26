@@ -37,6 +37,10 @@ export const LABELS = {
   credentials: 'cloak/v1/credentials',
   /** Signed deletion of one's own identity. */
   identityDeletion: 'cloak/v1/identity-deletion',
+  /** Signed acceptance of one vault. */
+  vaultAcceptance: 'cloak/v1/vault-acceptance',
+  /** Signed acceptance of every vault one person adds the user to. */
+  inviterAcceptance: 'cloak/v1/inviter-acceptance',
   /** HKDF info and associated data of a client's local state; never sent to a server. */
   localState: 'cloak/v1/local-state',
 } as const satisfies Readonly<Record<string, `cloak/v1/${string}`>>;

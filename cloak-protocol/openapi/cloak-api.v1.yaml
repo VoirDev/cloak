@@ -42,6 +42,9 @@ info:
       `code`.
     - **Pagination.** Lists use keyset pagination: pass `nextCursor` back as `cursor` until a page
       has none. The vault log pages by `afterSeq`, a vault's sections by `afterChange`.
+    - **Response budget.** A response that carries section ciphertext holds whole sections, at
+      least one, up to `maxPageSize` sections and `maxPageBytes` bytes of ciphertext; its page ends
+      where the next section would not fit.
     - **Absent values.** Optional fields without a value are omitted, never sent as `null`.
     - **Hidden existence.** A vault or section the caller cannot see answers `404 not_found`, never
       `403`, so ids do not leak.
@@ -186,8 +189,10 @@ paths:
         logs that name them (`PROTOCOL.md` §5.7). The body is signed with the caller's current
         signing key, so the host's session alone cannot delete an account, and expires at
         `notAfter`, at most 10 minutes ahead, so a captured one cannot be sent again later.
-        Refused with `409 identity_in_vaults` while the caller is a member of a vault that is not
-        deleted. Afterwards every request of the caller answers `410 identity_deleted`.
+        Refused with `409 identity_in_vaults` while the caller is an accepted member of a vault that
+        is not deleted and has another member who is not deleted. The caller's vaults that would be
+        left with deleted members only go with the identity. Afterwards every request of the
+        caller answers `410 identity_deleted`.
       requestBody:
         required: true
         content:
@@ -544,13 +549,14 @@ paths:
       description: |
         Pauses section writes to every vault named, all or none, for `Meta.limits.writePauseSeconds`
         (`PROTOCOL.md` §7.5), so a request carrying a checkpoint cannot be outrun by writes. Needs
-        an editor or stronger in each vault. An admin's pause replaces anyone else's; an editor may
-        pause a vault at most once per `Meta.limits.writePauseIntervalSeconds` (`429 rate_limited`)
-        and only where nobody else's pause holds it (`409 pause_held`). Asking again renews the
-        caller's own pause. A
-        pause ends when a request of the caller carrying a checkpoint for the vault is applied,
-        when it is released, or when it runs out. It is the server's help only: clients never
-        depend on it for what they accept.
+        an editor or stronger in each vault. An admin's pause replaces anyone else's; a member who
+        is not an admin may pause a vault at most once per `Meta.limits.writePauseIntervalSeconds`,
+        renewals included (`429 rate_limited`), and only where nobody else's pause holds it
+        (`409 pause_held`, with `Retry-After` until that pause ends). Asking again renews the
+        caller's own pause. While a pause holds, every section write to the vault answers
+        `503 busy` with a `Retry-After` of at most 2 seconds. A pause ends when a request of the
+        caller carrying a checkpoint for the vault is applied, when it is released, or when it runs
+        out. It is the server's help only: clients never depend on it for what they accept.
       requestBody:
         required: true
         content:
@@ -788,11 +794,19 @@ paths:
       operationId: acceptVault
       summary: Accept a vault one was added to
       description: |
-        Marks the caller's membership accepted (`PROTOCOL.md` §12.4). Until then the vault is
-        listed only with `pending=true` and the host does not count the caller for access checks.
-        Unsigned, the server's help against being added unasked; the log alone decides rights.
+        Marks the caller's membership accepted (`PROTOCOL.md` §12.4) with the `vaultAcceptance`
+        they signed with their current keys (§9), which the vault's view then carries. Until then
+        the vault is listed only with `pending=true` and the host does not count the caller for
+        access checks. Accepting again with a newer key version replaces the signature. The log
+        alone decides what a member may read and write.
       parameters:
         - $ref: '#/components/parameters/VaultId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Acceptance'
       responses:
         '204':
           description: Accepted.
@@ -823,7 +837,10 @@ paths:
       operationId: acceptInviter
       summary: Accept everything from one person
       description: |
-        Accepts every vault the named user added the caller to, and every one they add later.
+        Accepts every vault the named user added the caller to, and every one they add later, with
+        the `inviterAcceptance` the caller signed with their current keys (`PROTOCOL.md` §9). The
+        views of those vaults carry it. Accepting again with a newer key version replaces the
+        signature. Answers `404 not_found` unless the person is registered and not deleted.
       requestBody:
         required: true
         content:
@@ -978,7 +995,9 @@ paths:
       description: |
         For each item, what the checkpoint carried by log entry `checkpointSeq` holds for the
         section: its leaf with the RFC 6962 audit path, or the two neighbouring leaves with theirs to
-        show it is absent (`PROTOCOL.md` §7.5). Items may name different checkpoints of the vault.
+        show it is absent (`PROTOCOL.md` §7.5). Items may name different checkpoints of the vault,
+        whose sizes may add up to at most `maxSectionsPerVault` leaves; a batch naming more answers
+        `400 validation_failed`, rule `max_checkpoint_leaves` on `/items`.
       parameters:
         - $ref: '#/components/parameters/VaultId'
       requestBody:
@@ -1286,7 +1305,9 @@ paths:
         number of that write, and the sections the host removed (`removed`). A page covers every
         change after `afterChange` up to `throughChangeSeq`; pass that back as `afterChange` to
         receive only what changed since, until it equals `lastChangeSeq`. A client keeps a replica
-        up to date this way.
+        up to date this way. A page holds at most `limit` sections and `maxPageBytes` bytes of
+        ciphertext, always at least one section; a page cut short by either ends at its last
+        write's change number.
       parameters:
         - $ref: '#/components/parameters/VaultId'
         - name: afterChange
@@ -1522,16 +1543,23 @@ paths:
       tags: [Nodes]
       operationId: getNode
       summary: Read a node
-      description: The latest write of each of the node's sections in vaults the caller belongs to.
+      description: |
+        The latest write of each of the node's sections in vaults the caller belongs to, ordered by
+        vault and then section name, one page at a time: at most `maxPageSize` sections and
+        `maxPageBytes` bytes of ciphertext, always at least one section. Pass `nextCursor` back as
+        `cursor` until a page has none. A cursor of another node answers `400 validation_failed`.
       parameters:
         - $ref: '#/components/parameters/NodeId'
+        - $ref: '#/components/parameters/Cursor'
       responses:
         '200':
-          description: The node's readable sections.
+          description: One page of the node's readable sections.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/NodeSections'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -1550,6 +1578,9 @@ paths:
       tags: [Nodes]
       operationId: batchGetNodes
       summary: Read several nodes
+      description: |
+        The readable sections of up to `maxBatchSize` distinct nodes, sharing one page's budget
+        (see the `200` response).
       requestBody:
         required: true
         content:
@@ -1558,7 +1589,12 @@ paths:
               $ref: '#/components/schemas/BatchGetNodesRequest'
       responses:
         '200':
-          description: The readable sections of each node found.
+          description: |
+            The readable sections of each node found. The nodes share one page's budget, at most
+            `maxPageSize` sections and `maxPageBytes` bytes of ciphertext, filled node by node in
+            node id order: a node whose sections do not all fit carries `nextCursor` to read on
+            with `getNode`, and nodes the budget did not reach are listed in `unreadNodeIds` to ask
+            for again.
           content:
             application/json:
               schema:
@@ -1594,7 +1630,7 @@ components:
       name: userId
       in: path
       required: true
-      description: Host user id.
+      description: Cloak user id, the UUID derived from the host user id (`PROTOCOL.md` §5.0).
       schema:
         $ref: '#/components/schemas/Uuid'
     VaultId:
@@ -1714,7 +1750,12 @@ components:
             status: 404
             code: not_found
     Conflict:
-      description: The request conflicts with the current state.
+      description: |
+        The request conflicts with the current state. A `pause_held` conflict carries
+        `Retry-After`: when the pause the caller asked for again ends.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
       content:
         application/problem+json:
           schema:
@@ -1751,7 +1792,10 @@ components:
             status: 410
             code: identity_deleted
     TooManyRequests:
-      description: The host's request guard refused the request; retry after `Retry-After`.
+      description: |
+        The host's request guard refused the request, or a member who is not an admin paused a
+        vault's writes again within `Meta.limits.writePauseIntervalSeconds`; retry after
+        `Retry-After`. Nothing was applied.
       headers:
         Retry-After:
           $ref: '#/components/headers/RetryAfter'
@@ -1766,8 +1810,8 @@ components:
             code: rate_limited
     ServiceUnavailable:
       description: |
-        The vault is busy with another change, or the request ran out of database time; retry
-        after `Retry-After`. Nothing was applied.
+        The vault is busy with another change, its section writes are paused for a checkpoint, or
+        the request ran out of database time; retry after `Retry-After`. Nothing was applied.
       headers:
         Retry-After:
           $ref: '#/components/headers/RetryAfter'
@@ -1936,7 +1980,7 @@ components:
           $ref: '#/components/schemas/Limits'
     Limits:
       type: object
-      required: [maxPendingInvitations, maxPendingInvitationsPerInviter, maxSectionBytes, maxRequestBytes, maxBatchSize, maxPageSize, maxIndexPageSize, maxMembersPerVault, maxSectionsPerVault, maxStoredSectionsPerVault, writePauseSeconds, writePauseIntervalSeconds, kdf]
+      required: [maxPendingInvitations, maxPendingInvitationsPerInviter, maxSectionBytes, maxRequestBytes, maxBatchSize, maxPageSize, maxIndexPageSize, maxPageBytes, maxMembersPerVault, maxSectionsPerVault, maxStoredSectionsPerVault, writePauseSeconds, writePauseIntervalSeconds, maxKeyVersions, kdf]
       properties:
         maxPendingInvitations:
           type: integer
@@ -1968,17 +2012,28 @@ components:
         maxBatchSize:
           type: integer
           format: int32
-          description: Maximum items per batch call and envelopes per rotation.
+          description: |
+            Maximum items per batch call, such as sections per batch write or vaults per batch
+            rotation. A rotation's envelopes are bounded by `maxMembersPerVault` instead.
           examples: [100]
         maxPageSize:
           type: integer
           format: int32
+          description: Largest page, and most sections one response with ciphertext holds.
           examples: [100]
         maxIndexPageSize:
           type: integer
           format: int32
           description: Page size of index listings (section headers, checkpoint leaves).
           examples: [1000]
+        maxPageBytes:
+          type: integer
+          format: int32
+          description: |
+            Most bytes of section ciphertext one response carries (the section feed, node reads).
+            A response holds whole sections, always at least one, so it is never below
+            `maxSectionBytes`.
+          examples: [8388608]
         maxMembersPerVault:
           type: integer
           format: int32
@@ -2004,13 +2059,23 @@ components:
         writePauseSeconds:
           type: integer
           format: int32
-          description: How long a write pause holds a vault.
+          description: How long a write pause holds a vault, unless it ends sooner.
           examples: [30]
         writePauseIntervalSeconds:
           type: integer
           format: int32
-          description: Least time between two pauses of one vault by the same editor.
+          description: |
+            Least time between two pauses of one vault by the same member who is not an admin,
+            renewals included.
           examples: [300]
+        maxKeyVersions:
+          type: integer
+          format: int32
+          description: |
+            Most key versions of one identity, so the chain of key statements a reader verifies
+            stays bounded. A key replacement past it answers `400 validation_failed`, rule
+            `max_key_versions`.
+          examples: [100]
         kdf:
           type: object
           description: Argon2id bounds; clients refuse parameters outside them (`PROTOCOL.md` §5.3).
@@ -2210,12 +2275,42 @@ components:
           maxItems: 100
           items:
             $ref: '#/components/schemas/LogEntryInput'
+    Acceptance:
+      type: object
+      description: An acceptance signed with the caller's current identity keys (`PROTOCOL.md` §9).
+      required: [keyVersion, signature]
+      properties:
+        keyVersion:
+          description: The caller's current identity key version, whose signing key signed it.
+          $ref: '#/components/schemas/IdentityKeyVersion'
+        signature:
+          $ref: '#/components/schemas/SignatureBlob'
     AcceptInviterRequest:
       type: object
-      required: [inviterUserId]
+      required: [inviterUserId, keyVersion, signature]
       properties:
         inviterUserId:
           $ref: '#/components/schemas/Uuid'
+        keyVersion:
+          description: The caller's current identity key version, whose signing key signed it.
+          $ref: '#/components/schemas/IdentityKeyVersion'
+        signature:
+          description: The caller's `inviterAcceptance` of the person (`PROTOCOL.md` §9).
+          $ref: '#/components/schemas/SignatureBlob'
+    VaultAcceptance:
+      type: object
+      description: |
+        The caller's signed acceptance of a vault (`PROTOCOL.md` §9): its `vaultAcceptance`, or,
+        with `inviterUserId`, the `inviterAcceptance` of the person who added them. A client checks
+        the signature and, for an inviter, that the verified log names them as who added the caller.
+      required: [keyVersion, signature]
+      properties:
+        inviterUserId:
+          $ref: '#/components/schemas/Uuid'
+        keyVersion:
+          $ref: '#/components/schemas/IdentityKeyVersion'
+        signature:
+          $ref: '#/components/schemas/SignatureBlob'
     NodeKey:
       type: string
       minLength: 1
@@ -2361,7 +2456,10 @@ components:
           $ref: '#/components/schemas/Uuid'
         accepted:
           type: boolean
-          description: Whether the caller accepted the vault; unsigned, the server's help (`PROTOCOL.md` §12.4).
+          description: Whether the server lists the vault as accepted by the caller (`PROTOCOL.md` §12.4).
+        acceptance:
+          description: The caller's signed acceptance; absent while they have not accepted.
+          $ref: '#/components/schemas/VaultAcceptance'
         addedByUserId:
           description: Who added the caller, from the log; absent for the vault's creator.
           $ref: '#/components/schemas/Uuid'
@@ -2388,7 +2486,7 @@ components:
           $ref: '#/components/schemas/Timestamp'
     CreateVaultRequest:
       type: object
-      required: [id, keyEnvelope, log]
+      required: [id, keyEnvelope, log, acceptance]
       properties:
         id:
           $ref: '#/components/schemas/Uuid'
@@ -2398,6 +2496,9 @@ components:
         log:
           description: The signed `vault_created` entry.
           $ref: '#/components/schemas/LogEntryInput'
+        acceptance:
+          description: The creator's `vaultAcceptance` of the new vault, signed with the keys that sign the entry.
+          $ref: '#/components/schemas/Acceptance'
     VaultKey:
       type: object
       required: [version, createdAt]
@@ -2940,15 +3041,18 @@ components:
           items:
             $ref: '#/components/schemas/SectionRef'
     NodeSections:
-      type: object
-      required: [nodeId, sections]
-      properties:
-        nodeId:
-          $ref: '#/components/schemas/Uuid'
-        sections:
-          type: array
-          items:
-            $ref: '#/components/schemas/SectionWrite'
+      allOf:
+        - $ref: '#/components/schemas/PageInfo'
+        - type: object
+          required: [nodeId, sections]
+          properties:
+            nodeId:
+              $ref: '#/components/schemas/Uuid'
+            sections:
+              type: array
+              description: This page of the node's sections, by vault and then section name.
+              items:
+                $ref: '#/components/schemas/SectionWrite'
     BatchGetNodesRequest:
       type: object
       required: [nodeIds]
@@ -2962,14 +3066,23 @@ components:
             $ref: '#/components/schemas/Uuid'
     BatchGetNodesResponse:
       type: object
-      required: [items, missingNodeIds]
+      required: [items, missingNodeIds, unreadNodeIds]
       properties:
         items:
           type: array
+          description: |
+            The nodes with a readable section on this page, in request order; one whose sections
+            did not all fit carries `nextCursor` for `getNode`.
           items:
             $ref: '#/components/schemas/NodeSections'
         missingNodeIds:
           type: array
+          description: The requested nodes without a readable section, in request order.
+          items:
+            $ref: '#/components/schemas/Uuid'
+        unreadNodeIds:
+          type: array
+          description: The requested nodes this page's budget did not reach, in request order; ask again.
           items:
             $ref: '#/components/schemas/Uuid'
 
@@ -3021,12 +3134,12 @@ components:
         | `recipients_mismatch` | 409 | A rotation must reseal to exactly the remaining members |
         | `credentials_version_conflict` | 409 | Credentials changed on another device; see `currentVersion` |
         | `identity_version_conflict` | 409 | Keys were replaced on another device; see `currentVersion` |
-        | `identity_in_vaults` | 409 | Delete or leave every vault before deleting the identity |
+        | `identity_in_vaults` | 409 | Delete or leave every accepted vault with other members who are not deleted first |
         | `pause_held` | 409 | Someone else's write pause holds the vault |
         | `too_many_invitations` | 409 | The person has too many vaults they have not accepted |
         | `identity_deleted` | 410 | The caller, or the user the request names, is deleted |
         | `payload_too_large` | 413 | Body or section larger than the limit |
-        | `rate_limited` | 429 | The host's request guard refused; see `Retry-After` |
+        | `rate_limited` | 429 | The host's request guard refused, or a write pause was asked again too soon; see `Retry-After` |
         | `busy` | 503 | The vault is busy, paused for a checkpoint, or the request ran out of time; see `Retry-After` |
         | `internal_error` | 500 | Unexpected failure; see `traceId` |
       enum:

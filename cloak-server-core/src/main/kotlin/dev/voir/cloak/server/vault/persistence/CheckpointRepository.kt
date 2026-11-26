@@ -74,31 +74,17 @@ internal object CheckpointRepository {
     }
 
     /**
-     * Loads the leaves of some checkpoints in checkpoint order, in one query.
+     * Loads one checkpoint's leaves in checkpoint order: only the spans that hold it.
      *
      * @param vaultId Vault.
-     * @param seqs Entries carrying the checkpoints.
-     * @return Leaves by entry; every entry of [seqs] is present, a checkpoint without leaves empty.
+     * @param seq Entry carrying the checkpoint.
+     * @return Its leaves; empty for a checkpoint without leaves.
      */
-    fun leaves(vaultId: VaultId, seqs: Collection<Long>): Map<Long, List<CheckpointLeaf>> {
-        if (seqs.isEmpty()) return emptyMap()
-        val result = seqs.associateWith { mutableListOf<CheckpointLeaf>() }
-        val first = seqs.min()
-        val last = seqs.max()
+    fun leaves(vaultId: VaultId, seq: Long): List<CheckpointLeaf> =
         CheckpointLeavesTable.selectAll()
-            .where {
-                (CheckpointLeavesTable.vaultId eq vaultId.value) and (CheckpointLeavesTable.fromSeq lessEq last) and
-                    (CheckpointLeavesTable.untilSeq.isNull() or (CheckpointLeavesTable.untilSeq greater first))
-            }
+            .where { inCheckpoint(vaultId, seq) }
             .orderBy(CheckpointLeavesTable.nodeId to SortOrder.ASC, CheckpointLeavesTable.sectionName to SortOrder.ASC)
-            .forEach { row ->
-                val from = row[CheckpointLeavesTable.fromSeq]
-                val until = row[CheckpointLeavesTable.untilSeq] ?: Long.MAX_VALUE
-                val leaf = row.toLeaf()
-                result.forEach { (seq, leaves) -> if (seq in from until until) leaves += leaf }
-            }
-        return result
-    }
+            .map { it.toLeaf() }
 
     /**
      * Loads one page of a checkpoint's leaves in checkpoint order.
@@ -111,15 +97,15 @@ internal object CheckpointRepository {
      */
     fun page(vaultId: VaultId, seq: Long, after: LeafPosition?, limit: Int): List<CheckpointLeaf> =
         CheckpointLeavesTable.selectAll()
-            .where {
-                val inCheckpoint = (CheckpointLeavesTable.vaultId eq vaultId.value) and
-                    (CheckpointLeavesTable.fromSeq lessEq seq) and
-                    (CheckpointLeavesTable.untilSeq.isNull() or (CheckpointLeavesTable.untilSeq greater seq))
-                if (after == null) inCheckpoint else inCheckpoint and after.precedes()
-            }
+            .where { if (after == null) inCheckpoint(vaultId, seq) else inCheckpoint(vaultId, seq) and after.precedes() }
             .orderBy(CheckpointLeavesTable.nodeId to SortOrder.ASC, CheckpointLeavesTable.sectionName to SortOrder.ASC)
             .limit(limit)
             .map { it.toLeaf() }
+
+    /** Rows whose span holds the checkpoint of entry [seq]. */
+    private fun inCheckpoint(vaultId: VaultId, seq: Long): Op<Boolean> =
+        (CheckpointLeavesTable.vaultId eq vaultId.value) and (CheckpointLeavesTable.fromSeq lessEq seq) and
+            (CheckpointLeavesTable.untilSeq.isNull() or (CheckpointLeavesTable.untilSeq greater seq))
 
     /** Sections after this position in checkpoint order. */
     private fun LeafPosition.precedes(): Op<Boolean> =

@@ -34,7 +34,7 @@ class VaultDeletionTest {
     @Test
     fun `erases the content, keeps the log and members, and lists the vault no more`() {
         cloak.addMember(alice, vault, bob, Role.EDITOR)
-        cloak.server.members.accept(bob.id, vault)
+        cloak.accept(bob, vault)
         val node = cloak.node(alice, vault)
         cloak.write(alice, vault, node, "general")
         val shared = cloak.node(alice, cloak.createVault(alice))

@@ -14,7 +14,8 @@ export interface CloakStorage {
    * Reads a value.
    *
    * @param key Record key.
-   * @returns The value, or `undefined` when there is none.
+   * @returns The value, or `undefined` when there is none: a copy the caller owns, since the
+   *   client overwrites a secret key it read with zeros once it is done with it.
    */
   get(key: string): Promise<Uint8Array | undefined>;
 
@@ -40,6 +41,16 @@ export interface CloakStorage {
    * @param prefix Key prefix, ending in `/`.
    */
   deletePrefix(prefix: string): Promise<void>;
+
+  /**
+   * Lists the keys of every value whose key starts with a prefix, in any order. The client lists
+   * a user's records once after a key replacement, to seal them all under the new key; the
+   * prefix always ends in `/`.
+   *
+   * @param prefix Key prefix, ending in `/`.
+   * @returns The keys.
+   */
+  keys(prefix: string): Promise<string[]>;
 
   /**
    * Replaces a value with one computed from it, atomically: no other write to the key lands in
@@ -80,6 +91,7 @@ export function createMemoryStorage(): CloakStorage {
       for (const key of [...records.keys()]) if (key.startsWith(prefix)) records.delete(key);
       return Promise.resolve();
     },
+    keys: (prefix) => Promise.resolve([...records.keys()].filter((key) => key.startsWith(prefix))),
     update: (key, change) => {
       try {
         const next = change(records.get(key)?.slice());

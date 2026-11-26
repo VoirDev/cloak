@@ -8,7 +8,8 @@ import org.jetbrains.exposed.v1.core.Table
 
 /**
  * Relational schema of `cloak.vault_members`: members with their role, committed key version and
- * the current vault key sealed to them; the envelope is absent while it awaits delivery.
+ * the current vault key sealed to them; the envelope is absent while it awaits delivery. A member's
+ * own signed acceptance is kept beside whether the server lists the vault as accepted.
  */
 internal object VaultMembersTable : Table("cloak.vault_members") {
     /** Vault; deleting it deletes its members. */
@@ -23,11 +24,20 @@ internal object VaultMembersTable : Table("cloak.vault_members") {
     /** Member. */
     val userId = uuid("user_id").index("ix_vault_members__user_id")
 
-    /** Whether the member accepted the vault (`PROTOCOL.md` §12.4); unsigned, the server's help. */
+    /**
+     * Whether the server lists the vault as accepted by the member (`PROTOCOL.md` §12.4), by their
+     * own acceptance or one of the person who added them.
+     */
     val accepted = bool("accepted")
 
     /** Who added the member, per the log; `null` for the vault's creator. */
     val addedByUserId = uuid("added_by_user_id").nullable()
+
+    /** Key version of the member's own signed `vaultAcceptance` (`PROTOCOL.md` §9); `null` without one. */
+    val acceptanceKeyVersion = integer("acceptance_key_version").nullable()
+
+    /** The member's own signed `vaultAcceptance`, the latest they sent; `null` with [acceptanceKeyVersion]. */
+    val acceptanceSignature = binary("acceptance_signature").nullable()
 
     /** Role: owner, admin, editor or viewer. */
     val role = varchar("role", 16)
@@ -72,6 +82,12 @@ internal object VaultMembersTable : Table("cloak.vault_members") {
             SqlCondition(
                 "(key_envelope is null and envelope_key_version is null) or " +
                     "(key_envelope is not null and envelope_key_version is not null and octet_length(key_envelope) = 81)",
+            )
+        }
+        check("ck_vault_members__acceptance_complete") {
+            SqlCondition(
+                "(acceptance_key_version is null and acceptance_signature is null) or " +
+                    "(acceptance_key_version is not null and acceptance_signature is not null and octet_length(acceptance_signature) = 65)",
             )
         }
     }

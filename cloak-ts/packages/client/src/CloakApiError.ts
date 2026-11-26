@@ -23,6 +23,7 @@ export type CloakApiErrorCode =
   | 'identity_version_conflict'
   | 'identity_in_vaults'
   | 'pause_held'
+  | 'too_many_invitations'
   | 'identity_deleted'
   | 'payload_too_large'
   | 'rate_limited'

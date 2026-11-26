@@ -1,7 +1,14 @@
 import { Canonical } from './canonical.ts';
 import { LABELS } from './labels.ts';
-import { CRYPTO_SUITE, keysDigest, sameKeys, type PublicKeys } from './publicKeys.ts';
-import { checkSignature, isSmallOrderKey, sign } from './signatures.ts';
+import {
+  CRYPTO_SUITE,
+  isWellFormedKeys,
+  keysDigest,
+  sameKeys,
+  type PublicKeys,
+} from './publicKeys.ts';
+import { checkEncryptionKey } from './hpke.ts';
+import { checkSignature, checkSigningKey, sign } from './signatures.ts';
 
 /** A key version as published, with its signatures (`PROTOCOL.md` §5.2). */
 export interface KeyStatement {
@@ -59,15 +66,25 @@ export function signKeyStatement(
  *
  * @param statement Statement to check.
  * @param previous The trusted version it must follow; absent for version 1.
- * @returns Whether it is valid: the right user and version, keys of usable shape, its own signature
- *   and, after version 1, the previous recovery key's signature.
+ * @returns Whether it is valid: fields that fit their types (§3), the right user and version, keys
+ *   of usable shape, its own signature and, after version 1, the previous recovery key's signature.
  */
 export function verifyKeyStatement(statement: KeyStatement, previous?: PublicKeys): boolean {
   const { keys } = statement;
+  // A field outside its type has no canonical message to verify.
+  if (!isWellFormedKeys(keys) || (previous !== undefined && !isWellFormedKeys(previous)))
+    return false;
   const expectedVersion = previous === undefined ? 1 : previous.keyVersion + 1;
   if (keys.keyVersion !== expectedVersion || keys.cryptoSuite !== CRYPTO_SUITE) return false;
   if (previous !== undefined && previous.userId !== keys.userId) return false;
-  if (isSmallOrderKey(keys.recoverySigningPublicKey)) return false;
+  // Every key must be usable before anyone relies on it: a member whose encryption key cannot be
+  // sealed to would make every rotation that keeps them fail (`PROTOCOL.md` §5.1).
+  if (
+    checkSigningKey(keys.signingPublicKey) !== undefined ||
+    checkSigningKey(keys.recoverySigningPublicKey) !== undefined ||
+    checkEncryptionKey(keys.encryptionPublicKey) !== undefined
+  )
+    return false;
   const message = keyStatementMessage(keys, previous);
   if (checkSignature(keys.signingPublicKey, message, statement.signature) !== undefined)
     return false;
@@ -104,7 +121,8 @@ export type KeyChainResult =
  *
  * @param trusted The version the client pinned or verified before.
  * @param statements Every statement the server serves for the user, in any order.
- * @returns The trusted chain up to the newest version, or where it breaks.
+ * @returns The trusted chain up to the newest version, or where it breaks: a statement of the user
+ *   whose fields do not fit their types (§3) breaks it at its version as `bad_statement`.
  */
 export function followKeyChain(
   trusted: PublicKeys,
@@ -115,6 +133,9 @@ export function followKeyChain(
   for (const statement of statements) {
     if (statement.keys.userId !== trusted.userId) continue;
     const version = statement.keys.keyVersion;
+    // Checked before digesting, which needs a canonical message.
+    if (!isWellFormedKeys(statement.keys))
+      return { ok: false, reason: 'bad_statement', keyVersion: version };
     const seen = byVersion.get(version);
     if (seen !== undefined && !sameKeys(seen.keys, statement.keys)) {
       return { ok: false, reason: 'key_alarm', keyVersion: version };

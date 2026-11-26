@@ -100,6 +100,17 @@ describe('checkpoints', () => {
     expect(verifyAbsence({ size: 0 }, between, fromHex(text(CHECKPOINTS, 'emptyRoot')))).toBe(true);
   });
 
+  it('refuses to build a checkpoint that names a section twice', () => {
+    const leaves = [leafAt(0), leafAt(1), leafAt(2)];
+    const twice = [...leaves, { ...leafAt(1), dataVersion: 99 }];
+    expect(() => checkpointRoot(twice)).toThrow(
+      expect.objectContaining({ code: 'invalid_format' }),
+    );
+    expect(() => checkpointRoot([...leaves, leafAt(1)])).toThrow(
+      expect.objectContaining({ code: 'invalid_format' }),
+    );
+  });
+
   it('builds the same tree level by level as the recursive definition', () => {
     const recursive = (hashes: readonly Uint8Array[]): Uint8Array => {
       if (hashes.length === 0) return treeHash([]);

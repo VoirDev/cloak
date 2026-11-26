@@ -119,6 +119,15 @@ describe('key derivation', () => {
     }
   });
 
+  it('refuses a key version a u32 cannot hold instead of wrapping it', () => {
+    const vector = objects(KDF, 'vaultKeys')[0];
+    if (vector === undefined) throw new Error('vault key');
+    const key = hex(vector, 'vaultKey');
+    const vaultId = text(vector, 'vaultId');
+    expect(() => keyCommitment(key, vaultId, 2 ** 32 + 1)).toThrow(RangeError);
+    expect(() => keyCommitment(key, vaultId, -1)).toThrow(RangeError);
+  });
+
   it('refuses a vault key that is not the committed one', () => {
     const vector = child(KDF, 'keyMismatch');
     const vaultId = text(vector, 'vaultId');

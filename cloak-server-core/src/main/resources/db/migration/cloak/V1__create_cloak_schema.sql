@@ -14,9 +14,11 @@
 -- * Public keys, digests, commitments and checkpoints are raw 32-byte values.
 -- * user_id values come from the host app's authentication. Cloak never stores credentials.
 -- * Every instant is TIMESTAMPTZ with microsecond precision; the application truncates to it.
--- * Concurrency: every request that changes a vault locks its `vaults` row first (several vaults
---   in id order), so log appends, rotations and section writes of one vault run one at a time and
---   the change numbers of sections commit in order.
+-- * Concurrency: every request locks its caller's `identities` row first (key share), and a
+--   deletion or erasure the deleted user's row (for update); then the `vaults` rows they change
+--   (several vaults in id order),
+--   so log appends, rotations and section writes of one vault run one at a time and the change
+--   numbers of sections commit in order.
 
 -- ---------------------------------------------------------------------------------------------
 -- identities: one row per registered user: the host's id of the user, the current key version and
@@ -176,8 +178,11 @@ create table cloak.vault_keys (
 -- vault_members: members with their role and committed key version (PROTOCOL.md §7.2), and the
 -- current vault key sealed to them. The envelope is absent while it awaits delivery, such as
 -- after a rotation that skipped a member whose committed key version was superseded. accepted says
--- whether the member accepted the vault (unsigned, PROTOCOL.md §12.4); added_by_user_id is who
--- added them per the log, absent for the vault's creator.
+-- whether the server lists the vault as accepted by the member (PROTOCOL.md §12.4), by their own
+-- acceptance or one of the person who added them; acceptance_key_version and acceptance_signature
+-- are the member's own signed vaultAcceptance (§9), the latest they sent, absent when they accepted
+-- only the inviter or not at all. added_by_user_id is who added them per the log, absent for the
+-- vault's creator.
 -- ---------------------------------------------------------------------------------------------
 create table cloak.vault_members (
     vault_id                    uuid        not null,
@@ -189,6 +194,8 @@ create table cloak.vault_members (
     envelope_key_version        integer,
     accepted                    boolean     not null,
     added_by_user_id            uuid,
+    acceptance_key_version      integer,
+    acceptance_signature        bytea,
     added_at                    timestamptz not null,
     constraint pk_vault_members primary key (vault_id, user_id),
     constraint fk_vault_members__vault_id__vaults foreign key (vault_id)
@@ -202,6 +209,10 @@ create table cloak.vault_members (
     constraint ck_vault_members__envelope_complete check (
         (key_envelope is null and envelope_key_version is null) or
         (key_envelope is not null and envelope_key_version is not null and octet_length(key_envelope) = 81)
+    ),
+    constraint ck_vault_members__acceptance_complete check (
+        (acceptance_key_version is null and acceptance_signature is null) or
+        (acceptance_key_version is not null and acceptance_signature is not null and octet_length(acceptance_signature) = 65)
     )
 );
 
@@ -209,15 +220,26 @@ create index ix_vault_members__user_id on cloak.vault_members (user_id);
 create index ix_vault_members__user_id_accepted on cloak.vault_members (user_id, accepted);
 
 -- ---------------------------------------------------------------------------------------------
--- accepted_inviters: people whose every vault a user accepts, now and later (PROTOCOL.md §12.4).
--- Acceptance is the server's help against being added unasked; the log alone decides rights.
+-- accepted_inviters: people whose every vault a user accepts, now and later (PROTOCOL.md §12.4),
+-- with the user's signed inviterAcceptance (§9), the latest they sent. The views of those vaults
+-- carry it. Acceptance never decides what a member may read and write: the log alone does. Both
+-- people are registered identities; deleting either identity (PROTOCOL.md §5.7) deletes the row.
 -- ---------------------------------------------------------------------------------------------
 create table cloak.accepted_inviters (
     user_id          uuid        not null,
     inviter_user_id  uuid        not null,
+    key_version      integer     not null,
+    signature        bytea       not null,
     accepted_at      timestamptz not null,
-    constraint pk_accepted_inviters primary key (user_id, inviter_user_id)
+    constraint pk_accepted_inviters primary key (user_id, inviter_user_id),
+    constraint fk_accepted_inviters__user_id__identities foreign key (user_id)
+        references cloak.identities (user_id) on delete cascade on update restrict,
+    constraint fk_accepted_inviters__inviter_user_id__identities foreign key (inviter_user_id)
+        references cloak.identities (user_id) on delete cascade on update restrict,
+    constraint ck_accepted_inviters__signature_length check (octet_length(signature) = 65)
 );
+
+create index ix_accepted_inviters__inviter_user_id on cloak.accepted_inviters (inviter_user_id);
 
 -- ---------------------------------------------------------------------------------------------
 -- vault_log: the signed, hash-chained history of a vault (PROTOCOL.md §7), append-only. Each
@@ -378,7 +400,8 @@ create table cloak.sections (
     constraint ck_sections__change_seq check (change_seq >= 1)
 );
 
-create index ix_sections__node_id on cloak.sections (node_id);
+-- A node's sections in reading order, so a node read pages without sorting the node's rows.
+create index ix_sections__node_id_vault_id_section_name on cloak.sections (node_id, vault_id, section_name);
 
 -- ---------------------------------------------------------------------------------------------
 -- section_removals: sections the host removed with their node (a purge), each with the change

@@ -1,7 +1,8 @@
 import { sha256 } from '@noble/hashes/sha2.js';
 
-import { compareBytes, concatBytes, equalBytes, utf8, uuidBytes } from './bytes.ts';
-import { Canonical } from './canonical.ts';
+import { CloakCryptoError } from './CloakCryptoError.ts';
+import { compareBytes, concatBytes, equalBytes, isUuid, utf8, uuidBytes } from './bytes.ts';
+import { Canonical, isBytes32, isStr, isU64 } from './canonical.ts';
 
 /** A section's latest write as a checkpoint holds it (`PROTOCOL.md` §7.5). */
 export interface CheckpointLeaf {
@@ -57,6 +58,22 @@ export function leafData(leaf: CheckpointLeaf): Uint8Array {
 }
 
 /**
+ * Tells whether every field of a leaf fits its type in the canonical encoding (`PROTOCOL.md` §3),
+ * so that {@link leafData} encodes it.
+ *
+ * @param leaf The leaf, as served.
+ * @returns Whether it has leaf data.
+ */
+export function isWellFormedLeaf(leaf: CheckpointLeaf): boolean {
+  return (
+    isUuid(leaf.nodeId) &&
+    isStr(leaf.sectionName) &&
+    isU64(leaf.dataVersion) &&
+    isBytes32(leaf.writeHash)
+  );
+}
+
+/**
  * Hashes a leaf: `SHA-256(0x00 ‖ leafData)`.
  *
  * @param leaf The leaf.
@@ -94,13 +111,37 @@ export function sortLeaves(leaves: readonly CheckpointLeaf[]): readonly Checkpoi
 }
 
 /**
- * Computes a checkpoint: the RFC 6962 Merkle tree hash over the leaves in checkpoint order.
+ * Computes a checkpoint: the RFC 6962 Merkle tree hash over the leaves in checkpoint order. Its
+ * author lists one leaf per live section, from a map of the latest writes, so a list that names a
+ * section twice is a bug, not a checkpoint.
  *
  * @param leaves Latest writes of the vault's sections, in any order.
  * @returns The 32-byte root; `SHA-256` of nothing when there are no leaves.
+ * @throws {CloakCryptoError} `invalid_format` when the leaves name a section twice (§7.5).
  */
 export function checkpointRoot(leaves: readonly CheckpointLeaf[]): Uint8Array {
-  return treeHash(sortLeaves(leaves).map(leafHash));
+  const root = rootOfLeafList(leaves);
+  if (root === undefined)
+    throw new CloakCryptoError('invalid_format', 'A checkpoint holds one leaf per section');
+  return root;
+}
+
+/**
+ * Computes the root of a leaf list a reader holds, which it refuses when the list names a section
+ * twice (`PROTOCOL.md` §7.5), whatever root that list gives.
+ *
+ * @param leaves Well-formed leaves in any order.
+ * @returns The root, or `undefined` when two leaves share a node id and section name.
+ */
+export function rootOfLeafList(leaves: readonly CheckpointLeaf[]): Uint8Array | undefined {
+  const sorted = sortLeaves(leaves);
+  for (let index = 1; index < sorted.length; index += 1) {
+    const previous = sorted[index - 1];
+    const current = sorted[index];
+    if (previous !== undefined && current !== undefined && compareSections(previous, current) === 0)
+      return undefined;
+  }
+  return treeHash(sorted.map(leafHash));
 }
 
 /**

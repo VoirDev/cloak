@@ -15,6 +15,7 @@ import {
   type CloakStorage,
   type DecryptedSection,
 } from '../src/index.ts';
+import { register, replaceKeys } from './credentials.ts';
 
 /**
  * A client of one host user; the dev host trusts this header as its session. [fail] makes chosen
@@ -53,7 +54,7 @@ interface User {
 async function user(password = 'correct horse', storage?: CloakStorage): Promise<User> {
   const userId = crypto.randomUUID();
   const client = clientFor(userId, storage);
-  const registered = await client.register({ userId, password });
+  const registered = await register(client, { userId, password });
   return { userId, client, ...registered };
 }
 
@@ -102,6 +103,7 @@ function listedStorage(): { readonly storage: CloakStorage; readonly keys: () =>
         for (const key of [...held]) if (key.startsWith(prefix)) held.delete(key);
         await inner.deletePrefix(prefix);
       },
+      keys: (prefix) => inner.keys(prefix),
     },
   };
 }
@@ -176,10 +178,10 @@ describe('the TypeScript client against the Kotlin server', () => {
     ).toEqual({
       name: 'db-1',
     });
-    await expectApiError(
+    // A viewer's client writes nothing, as no reader would accept it.
+    await expect(
       carol.session.writeSection(vault.id, node, 'general', { type: 'server', content: {} }),
-      'role_required',
-    );
+    ).rejects.toMatchObject({ name: 'CloakSectionError', reason: 'not_an_editor' });
 
     // Bob loses the right to write; what he wrote before stays valid through the checkpoint.
     await alice.session.setRole(vault.id, bob.userId, 'viewer');
@@ -188,10 +190,9 @@ describe('the TypeScript client against the Kotlin server', () => {
     ).toEqual({
       name: 'db-1',
     });
-    await expectApiError(
+    await expect(
       bob.session.writeSection(vault.id, node, 'general', { type: 'server', content: {} }),
-      'role_required',
-    );
+    ).rejects.toMatchObject({ name: 'CloakSectionError', reason: 'not_an_editor' });
 
     // Carol is removed with a rotation and reads nothing after it; Bob still reads new content.
     const rotated = await alice.session.rotate(vault.id, [carol.userId]);
@@ -251,6 +252,40 @@ describe('the TypeScript client against the Kotlin server', () => {
     );
   });
 
+  it('reads a node larger than one page completely, page by page', async () => {
+    const userId = crypto.randomUUID();
+    let nodePages = 0;
+    const client = clientFor(userId, createMemoryStorage(), (request) => {
+      if (request.method === 'GET' && new URL(request.url).pathname.includes('/nodes/'))
+        nodePages += 1;
+      return false;
+    });
+    const alice = { userId, client, ...(await register(client, { userId, password: 'pw' })) };
+    const vault = await alice.session.createVault();
+    const node = await alice.session.createNode(vault.id, 'record');
+    // Eighteen sections of nearly 1 MiB each: more than two pages of 8 MiB.
+    const names = Array.from({ length: 18 }, (_, index) => `large_${String(index + 10)}`);
+    const contentOfName = (name: string): string => name.padEnd(1_048_000, 'x');
+    for (let start = 0; start < names.length; start += 6) {
+      await alice.session.writeSections(
+        names.slice(start, start + 6).map((name) => ({
+          vaultId: vault.id,
+          node,
+          name,
+          type: 'blob',
+          content: contentOfName(name),
+        })),
+      );
+    }
+
+    const read = await alice.session.readNode(nodeIdFor(node));
+
+    expect(nodePages).toBeGreaterThanOrEqual(3);
+    expect(read.sections.map((section) => section.name).toSorted()).toEqual(names);
+    for (const section of read.sections)
+      expect(contentOf(section)).toBe(contentOfName(section.name));
+  });
+
   it('an editor leaves with a checkpoint, and admins see that a rotation is due', async () => {
     const alice = await user();
     const bob = await user();
@@ -288,7 +323,7 @@ describe('the TypeScript client against the Kotlin server', () => {
       content: { before: true },
     });
 
-    const replaced = await bob.client.replaceKeys({
+    const replaced = await replaceKeys(bob.client, {
       recoveryKeyCode: bob.recoveryKeyCode,
       newPassword: 'new keys',
     });
@@ -330,7 +365,7 @@ describe('the TypeScript client against the Kotlin server', () => {
     const bob = {
       userId: bobId,
       client: bobClient,
-      ...(await bobClient.register({ userId: bobId, password: 'bob' })),
+      ...(await register(bobClient, { userId: bobId, password: 'bob' })),
     };
     const vault = await alice.session.createVault();
     await meet(alice, bob);
@@ -338,7 +373,7 @@ describe('the TypeScript client against the Kotlin server', () => {
 
     // Recording fails here, as after a lost connection; the rotation then skips Bob's old keys.
     blocked = vault.id;
-    const replaced = await bob.client.replaceKeys({
+    const replaced = await replaceKeys(bob.client, {
       recoveryKeyCode: bob.recoveryKeyCode,
       newPassword: 'new keys',
     });
@@ -369,7 +404,7 @@ describe('the TypeScript client against the Kotlin server', () => {
     const { storage, keys } = listedStorage();
     const userId = crypto.randomUUID();
     const client = clientFor(userId, storage);
-    const registered = await client.register({
+    const registered = await register(client, {
       userId,
       password: 'password',
       rememberSecretKey: true,
@@ -406,7 +441,7 @@ describe('the TypeScript client against the Kotlin server', () => {
       'identity_deleted',
     );
     await expectApiError(
-      clientFor(userId).register({ userId, password: 'again' }),
+      register(clientFor(userId), { userId, password: 'again' }),
       'identity_deleted',
     );
   });
@@ -416,7 +451,7 @@ describe('the TypeScript client against the Kotlin server', () => {
     const client = clientFor(userId);
     expect(await client.identityStatus()).toBe('none');
 
-    await client.register({ userId, password: 'correct horse' });
+    await register(client, { userId, password: 'correct horse' });
     expect(await client.identityStatus()).toBe('registered');
     expect(await clientFor(userId).identityStatus()).toBe('registered');
 
@@ -440,7 +475,7 @@ describe('the TypeScript client against the Kotlin server', () => {
 
     await expectApiError(carol.session.openVault(vault.id), 'identity_deleted');
     await expectApiError(
-      clientFor(carol.userId).register({ userId: carol.userId, password: 'again' }),
+      register(clientFor(carol.userId), { userId: carol.userId, password: 'again' }),
       'identity_deleted',
     );
     const later = await alice.client.unlock({
@@ -473,6 +508,35 @@ describe('the TypeScript client against the Kotlin server', () => {
     );
   });
 
+  it('deletes an account without signing anything for a vault whose other members are all deleted', async () => {
+    const userId = crypto.randomUUID();
+    const sent: string[] = [];
+    const client = clientFor(userId, createMemoryStorage(), (request) => {
+      sent.push(`${request.method} ${new URL(request.url).pathname}`);
+      return false;
+    });
+    const alice: User = { userId, client, ...(await register(client, { userId, password: 'pw' })) };
+    const carol = await user();
+    await meet(alice, carol);
+    const vault = await alice.session.createVault();
+    await alice.session.addMember(vault.id, carol.userId, 'editor');
+    await erase(carol.userId);
+
+    // The deletion mark is the server's word, so it leads to nothing signed: the server deletes
+    // the vault, which has no living member left, together with the identity.
+    sent.length = 0;
+    await alice.session.deleteAccount();
+    expect(
+      sent.filter(
+        (request) => request.includes(`/vaults/${vault.id}/`) && request.startsWith('POST'),
+      ),
+    ).toEqual([]);
+    await expectApiError(
+      clientFor(userId).unlock({ password: 'pw', secretKeyCode: alice.secretKeyCode }),
+      'identity_deleted',
+    );
+  });
+
   it('forgets a vault only on a signed fact, keeping its head, or when the user says so', async () => {
     const alice = await user();
     const { storage, keys } = listedStorage();
@@ -481,7 +545,7 @@ describe('the TypeScript client against the Kotlin server', () => {
     const bob: User = {
       userId: bobId,
       client: bobClient,
-      ...(await bobClient.register({ userId: bobId, password: 'pw' })),
+      ...(await register(bobClient, { userId: bobId, password: 'pw' })),
     };
     await meet(alice, bob);
     const records = (vaultId: string) =>

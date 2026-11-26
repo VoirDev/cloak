@@ -118,6 +118,9 @@ class Canonical {
   }
 
   str(type, s) {
+    // Well-formed Unicode only: UTF-8 would turn a lone surrogate into U+FFFD, so two strings
+    // would encode the same.
+    assert(s.isWellFormed(), 'string not well-formed');
     const b = utf8(s);
     assert(b.length <= 0xffff, 'string too long');
     return this.#push(type, s, Buffer.concat([u16(b.length), b]));
@@ -195,8 +198,11 @@ const u64 = (n) => {
   return b;
 };
 
-/** `str` encoding: u16 length, then UTF-8. */
-const strBytes = (s) => Buffer.concat([u16(utf8(s).length), utf8(s)]);
+/** `str` encoding: u16 length, then UTF-8 of well-formed Unicode. */
+const strBytes = (s) => {
+  assert(s.isWellFormed(), 'string not well-formed');
+  return Buffer.concat([u16(utf8(s).length), utf8(s)]);
+};
 
 const bundleAd = (label, userId, keyVersion) =>
   new Canonical().label(label).uuid(userId).u8(SUITE).u32(keyVersion);
@@ -378,8 +384,15 @@ function verifyInclusion(index, size, hash, path, root) {
 const compareSections = (a, b) =>
   Buffer.compare(uuidBytes(a.nodeId), uuidBytes(b.nodeId)) || Buffer.compare(utf8(a.sectionName), utf8(b.sectionName));
 
-/** A checkpoint over the latest writes of a vault's sections. */
+/** Whether a leaf list names some section twice, which no checkpoint does (PROTOCOL.md §7.5). */
+const namesSectionTwice = (leaves) => {
+  const sorted = [...leaves].sort(compareSections);
+  return sorted.some((l, i) => i > 0 && compareSections(sorted[i - 1], l) === 0);
+};
+
+/** A checkpoint over the latest writes of a vault's sections, one leaf per section. */
 function checkpointOf(leaves) {
+  assert(!namesSectionTwice(leaves), 'a checkpoint names a section twice');
   const sorted = [...leaves].sort(compareSections);
   return { leaves: sorted, root: treeHash(sorted.map((l) => leafHash(leafData(l)))) };
 }
@@ -676,16 +689,127 @@ const SMALL_ORDER = [
 const littleEndian = (b) => BigInt(`0x${hex(Buffer.from(b).reverse()) || '0'}`);
 const yOf = (point) => littleEndian(point) & ((1n << 255n) - 1n);
 
+/**
+ * Whether a 32-byte edwards25519 encoding is canonical (PROTOCOL.md §2): `y` below p, and no sign
+ * bit on a point whose `x` is 0, which only `y` = 1 and `y` = p − 1 have.
+ */
+function isCanonicalPoint(point) {
+  const y = yOf(point);
+  const signed = (point[31] & 0x80) !== 0;
+  return y < FIELD_PRIME && !(signed && (y === 1n || y === FIELD_PRIME - 1n));
+}
+
 /** Strict Ed25519 check; returns null when valid, else the reason. */
 function strictVerify(publicKey, message, signatureBlob) {
   if (signatureBlob.length !== 65 || signatureBlob[0] !== 1) return 'bad_signature';
   const signature = signatureBlob.subarray(1);
   if (littleEndian(signature.subarray(32)) >= GROUP_ORDER) return 'non_canonical_signature';
-  if (yOf(signature.subarray(0, 32)) >= FIELD_PRIME) return 'non_canonical_signature';
-  if (yOf(publicKey) >= FIELD_PRIME) return 'non_canonical_key';
+  if (!isCanonicalPoint(signature.subarray(0, 32))) return 'non_canonical_signature';
+  if (!isCanonicalPoint(publicKey)) return 'non_canonical_key';
   if (SMALL_ORDER.includes(hex(publicKey))) return 'small_order_key';
   const key = crypto.createPublicKey({ key: Buffer.concat([fromHex('302a300506032b6570032100'), publicKey]), format: 'der', type: 'spki' });
   return crypto.verify(null, message, key, signature) ? null : 'bad_signature';
+}
+
+/**
+ * u-coordinates of the five X25519 points of small order (PROTOCOL.md §5.1), little-endian: 0, 1,
+ * p − 1, and the two points of order 8.
+ */
+const X25519_SMALL_ORDER = [
+  '0000000000000000000000000000000000000000000000000000000000000000',
+  '0100000000000000000000000000000000000000000000000000000000000000',
+  'ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f',
+  'e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800',
+  '5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157',
+];
+
+/** Strict X25519 public key check (PROTOCOL.md §5.1); returns null when usable, else the reason. */
+function checkEncryptionKey(key) {
+  if (key.length !== 32 || (key[31] & 0x80) !== 0 || littleEndian(key) >= FIELD_PRIME) return 'non_canonical_key';
+  return X25519_SMALL_ORDER.includes(hex(key)) ? 'small_order_key' : null;
+}
+
+// ---------------------------------------------------------------------------------------------
+// edwards25519 arithmetic, only to build signatures that a cofactored verifier would accept and
+// the cofactorless one refuses (PROTOCOL.md §2)
+// ---------------------------------------------------------------------------------------------
+
+const fieldMod = (a) => ((a % FIELD_PRIME) + FIELD_PRIME) % FIELD_PRIME;
+function fieldPow(base, exponent) {
+  let result = 1n;
+  let b = fieldMod(base);
+  for (let e = exponent; e > 0n; e >>= 1n) {
+    if (e & 1n) result = (result * b) % FIELD_PRIME;
+    b = (b * b) % FIELD_PRIME;
+  }
+  return result;
+}
+const fieldInverse = (a) => fieldPow(a, FIELD_PRIME - 2n);
+const ED_D = fieldMod(-121665n * fieldInverse(121666n));
+const SQRT_MINUS_ONE = fieldPow(2n, (FIELD_PRIME - 1n) / 4n);
+
+/** Decodes a canonical point into extended coordinates (RFC 8032 §5.1.3). */
+function decodePoint(bytes) {
+  const y = yOf(bytes);
+  const x2 = fieldMod((y * y - 1n) * fieldInverse(ED_D * y * y + 1n));
+  let x = fieldPow(x2, (FIELD_PRIME + 3n) / 8n);
+  if (fieldMod(x * x - x2) !== 0n) x = fieldMod(x * SQRT_MINUS_ONE);
+  assert(fieldMod(x * x - x2) === 0n, 'point on the curve');
+  if ((x & 1n) !== BigInt(bytes[31] >> 7)) x = fieldMod(-x);
+  return { x, y, z: 1n, t: fieldMod(x * y) };
+}
+
+/** Adds two points (RFC 8032 §5.1.4). */
+function addPoints(p, q) {
+  const a = fieldMod((p.y - p.x) * (q.y - q.x));
+  const b = fieldMod((p.y + p.x) * (q.y + q.x));
+  const c = fieldMod(2n * ED_D * p.t * q.t);
+  const d = fieldMod(2n * p.z * q.z);
+  const e = b - a;
+  const f = d - c;
+  const g = d + c;
+  const h = b + a;
+  return { x: fieldMod(e * f), y: fieldMod(g * h), z: fieldMod(f * g), t: fieldMod(e * h) };
+}
+
+/** Multiplies a point by a scalar. */
+function multiplyPoint(point, scalar) {
+  let result = { x: 0n, y: 1n, z: 1n, t: 0n };
+  let addend = point;
+  for (let n = scalar; n > 0n; n >>= 1n) {
+    if (n & 1n) result = addPoints(result, addend);
+    addend = addPoints(addend, addend);
+  }
+  return result;
+}
+
+/** Encodes a point (RFC 8032 §5.1.2). */
+function encodePoint(point) {
+  const zInverse = fieldInverse(point.z);
+  const x = fieldMod(point.x * zInverse);
+  const y = fieldMod(point.y * zInverse);
+  const bytes = Buffer.from(y.toString(16).padStart(64, '0'), 'hex').reverse();
+  bytes[31] |= Number(x & 1n) << 7;
+  return bytes;
+}
+
+const scalarBytes = (n) => Buffer.from(n.toString(16).padStart(64, '0'), 'hex').reverse();
+const sha512 = (...parts) => crypto.createHash('sha512').update(Buffer.concat(parts)).digest();
+const ED_BASE = decodePoint(fromHex('5866666666666666666666666666666666666666666666666666666666666666'));
+
+/** The secret scalar of an Ed25519 seed (RFC 8032 §5.1.5). */
+function secretScalar(seed) {
+  const h = sha512(seed).subarray(0, 32);
+  h[0] &= 248;
+  h[31] &= 127;
+  h[31] |= 64;
+  return littleEndian(h);
+}
+
+/** An Ed25519 signature blob `R ‖ S` for nonce point [R], over [publicKey] as encoded. */
+function signWith(scalar, nonce, R, publicKey, message) {
+  const k = littleEndian(sha512(encodePoint(R), publicKey, message)) % GROUP_ORDER;
+  return { k, blob: Buffer.concat([Buffer.from([1]), encodePoint(R), scalarBytes((nonce + k * scalar) % GROUP_ORDER)]) };
 }
 
 /** Strict unpadding (PROTOCOL.md §8.1); returns the content or throws `bad_padding`. */
@@ -814,6 +938,7 @@ function statement(id, previous, recoverySigner = previous) {
 function verifyStatement(s, previous) {
   const id = directory(s.userId, s.keyVersion);
   if (id === undefined || hex(keysDigest(id)) !== s.keysDigest) return 'bad_statement';
+  if (checkEncryptionKey(id.encryptionPublicKey) !== null) return 'bad_statement';
   const message = keyStatementMessage(id, previous === undefined ? undefined : keysDigest(previous)).bytes();
   if (hex(message) !== s.message) return 'bad_statement';
   if (strictVerify(id.signingPublicKey, message, fromHex(s.signature)) !== null) return 'bad_statement';
@@ -1041,7 +1166,8 @@ function replayLog(entries, trustedVersions) {
     }
 
     if (has.checkpoint) {
-      if (e.checkpointLeaves !== undefined && !checkpointOf(e.checkpointLeaves).root.equals(e.checkpoint)) {
+      if (e.checkpointLeaves !== undefined &&
+        (namesSectionTwice(e.checkpointLeaves) || !checkpointOf(e.checkpointLeaves).root.equals(e.checkpoint))) {
         return fail('bad_checkpoint', seq);
       }
       checkpoints.push({ seq, root: e.checkpoint, leaves: e.checkpointLeaves });
@@ -1073,9 +1199,10 @@ function replayLog(entries, trustedVersions) {
 function verifyWrite(w, log) {
   // §8.4: a deleted vault's writes first, then rules 1, 2, 3, 6 and 4 in this order; content last.
   if (log.deleted) return 'vault_deleted';
+  // Another hash at `logSeq` is evidence of a fork, whether or not that entry is a head.
   const snapshot = log.snapshots[w.logSeq - 1];
+  if (snapshot !== undefined && !snapshot.hash.equals(w.logHeadHash)) return 'fork';
   if (snapshot === undefined || !snapshot.head) return 'not_a_head';
-  if (!snapshot.hash.equals(w.logHeadHash)) return 'fork';
   if (w.vaultKeyVersion !== snapshot.keyVersion) return 'wrong_key_version';
   if ((w.deleted === 1) !== (w.ciphertext === undefined)) return 'bad_deletion';
   const writer = directory(w.writerUserId, w.writerKeyVersion);
@@ -1301,6 +1428,8 @@ function scenario() {
   writes.set('owner-tampered', tampered);
   const deletedWithContent = write('owner-deleted-with-content', { sectionName: 'secrets', vaultKeyVersion: 2, dataVersion: 3, deleted: 1, logSeq: 8, previousWriteHash: w5.writeHash }, ownerV2, { x: 1 });
   assert(deletedWithContent.ciphertext !== undefined && forked !== undefined && e1 !== undefined, 'scenario');
+  // Cites an entry that is no head, by a hash the log does not have there: a fork, not a stale head.
+  write('owner-forked-not-a-head', { sectionName: 'general', vaultKeyVersion: 1, dataVersion: 3, logSeq: 6, logHeadHash: fixture('forked-head', 32), previousWriteHash: w3.writeHash }, ownerV1, { name: 'x' });
 
   return { entries, writes };
 }
@@ -1626,12 +1755,45 @@ function signatureVectors() {
   const identityPoint = fromHex(SMALL_ORDER[0]);
   const smallOrderSignature = Buffer.concat([Buffer.from([1]), identityPoint, Buffer.alloc(32)]);
 
+  // A point of order 8 added to R, or to the key, keeps the cofactored equation true and breaks the
+  // cofactorless one, which is the one every implementation checks.
+  const a = secretScalar(ownerV1.signingSeed);
+  const A = multiplyPoint(ED_BASE, a);
+  assert(encodePoint(A).equals(ownerV1.signingPublicKey), 'secret scalar');
+  const torsion = decodePoint(fromHex(SMALL_ORDER[4]));
+  assert(encodePoint(multiplyPoint(torsion, 8n)).equals(fromHex(SMALL_ORDER[0])), 'order 8');
+  assert(!encodePoint(multiplyPoint(torsion, 4n)).equals(fromHex(SMALL_ORDER[0])), 'not order 4');
+  const nonce = littleEndian(sha512(fixture('torsion-nonce', 32))) % GROUP_ORDER;
+  const torsionR = signWith(a, nonce, addPoints(multiplyPoint(ED_BASE, nonce), torsion), ownerV1.signingPublicKey, message).blob;
+  const mixedKey = encodePoint(addPoints(A, torsion));
+  let mixedMessage = message;
+  let mixed = signWith(a, nonce, multiplyPoint(ED_BASE, nonce), mixedKey, mixedMessage);
+  for (let i = 0; mixed.k % 8n === 0n; i += 1) {
+    mixedMessage = Buffer.concat([message, Buffer.from([i])]);
+    mixed = signWith(a, nonce, multiplyPoint(ED_BASE, nonce), mixedKey, mixedMessage);
+  }
+  // The cofactored equation [8][S]B = [8]R + [8][k]A holds for both; only the cofactorless one fails.
+  for (const [blob, key, signed] of [[torsionR, ownerV1.signingPublicKey, message], [mixed.blob, mixedKey, mixedMessage]]) {
+    const R = decodePoint(blob.subarray(1, 33));
+    const S = littleEndian(blob.subarray(33));
+    const k = littleEndian(sha512(blob.subarray(1, 33), key, signed)) % GROUP_ORDER;
+    assert(encodePoint(multiplyPoint(multiplyPoint(ED_BASE, S), 8n)).equals(
+      encodePoint(multiplyPoint(addPoints(R, multiplyPoint(decodePoint(key), k)), 8n))), 'cofactored equation');
+  }
+  const signedZeroX = fromHex('0100000000000000000000000000000000000000000000000000000000000080');
+  const zeroXR = Buffer.from(valid);
+  signedZeroX.copy(zeroXR, 1);
+
   const cases = [
     { name: 'valid', publicKey: ownerV1.signingPublicKey, signature: valid, message },
     { name: 's-not-reduced', publicKey: ownerV1.signingPublicKey, signature: unreduced, message },
     { name: 'r-not-canonical', publicKey: ownerV1.signingPublicKey, signature: nonCanonicalR, message },
     { name: 'small-order-key', publicKey: identityPoint, signature: smallOrderSignature, message },
     { name: 'wrong-message', publicKey: ownerV1.signingPublicKey, signature: valid, message: Buffer.concat([message, Buffer.from([0])]) },
+    { name: 'r-with-torsion', publicKey: ownerV1.signingPublicKey, signature: torsionR, message },
+    { name: 'mixed-order-key', publicKey: mixedKey, signature: mixed.blob, message: mixedMessage },
+    { name: 'key-zero-x-with-sign', publicKey: signedZeroX, signature: valid, message },
+    { name: 'r-zero-x-with-sign', publicKey: ownerV1.signingPublicKey, signature: zeroXR, message },
   ].map((c) => ({
     name: c.name,
     publicKey: hex(c.publicKey),
@@ -1642,10 +1804,39 @@ function signatureVectors() {
   assert(cases[0].reason === null && cases.slice(1).every((c) => c.reason !== null), 'signature cases');
 
   return {
-    description: 'Strict Ed25519 (PROTOCOL.md §2, §11). signature = 0x01 || R || S. `reason` null means valid; otherwise it must be refused for that reason.',
+    description: 'Strict Ed25519 (PROTOCOL.md §2, §11). signature = 0x01 || R || S. `reason` null means valid; otherwise it must be refused for that reason. ' +
+      '`r-with-torsion` and `mixed-order-key` pass the cofactored equation and fail the cofactorless one; `*-zero-x-with-sign` set the sign bit of a point whose x is 0.',
     smallOrderPoints: SMALL_ORDER,
     cases,
   };
+}
+
+/**
+ * X25519 public keys an identity may or may not register (PROTOCOL.md §5.1): every point of small
+ * order, a key with its top bit set, and one not below p, are refused; a real key is not.
+ */
+function encryptionKeyVectors() {
+  const topBit = Buffer.from(ownerV1.encryptionPublicKey);
+  topBit[31] |= 0x80;
+  const keys = [
+    ownerV1.encryptionPublicKey,
+    ...X25519_SMALL_ORDER.map(fromHex),
+    fromHex('edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f'),
+    topBit,
+  ];
+  // Every small-order point gives the all-zero shared secret, which X25519 refuses.
+  for (const point of X25519_SMALL_ORDER) {
+    let refused = false;
+    try {
+      crypto.diffieHellman({ privateKey: x25519Private(fixture('x25519-check', 32)), publicKey: x25519Public(fromHex(point)) });
+    } catch {
+      refused = true;
+    }
+    assert(refused, `small order ${point}`);
+  }
+  const cases = keys.map((key) => ({ key: hex(key), reason: checkEncryptionKey(key) }));
+  assert(cases[0].reason === null && cases.slice(1).every((c) => c.reason !== null), 'encryption key cases');
+  return cases;
 }
 
 function identityVectors() {
@@ -1677,6 +1868,7 @@ function identityVectors() {
     identities: allIdentities.map(identityJson),
     statements,
     negatives,
+    encryptionKeys: encryptionKeyVectors(),
     userNamespace: USER_NAMESPACE,
     userIds: [
       'alice',
@@ -1699,6 +1891,26 @@ function identityVectors() {
       return { ownerUserId, homeVaultId, nodeKey, name: hex(name.bytes()), nodeId: nodeIdOf(ownerUserId, homeVaultId, nodeKey) };
     }),
     credentials: credentialStatements(),
+    acceptances: acceptanceStatements(),
+  };
+}
+
+/**
+ * Signed acceptances (PROTOCOL.md §9): of one vault, and of everything one person adds the user to,
+ * each signed with the accepting user's current signing key.
+ */
+function acceptanceStatements() {
+  const vault = new Canonical().label('cloak/v1/vault-acceptance').uuid(OWNER_ID).u32(2).uuid(VAULT_ID);
+  const inviter = new Canonical().label('cloak/v1/inviter-acceptance').uuid(OWNER_ID).u32(2).uuid(BOB_ID);
+  const signed = (message) => {
+    const signature = signBlob(ownerV2.signingSeed, message.bytes());
+    assert(strictVerify(ownerV2.signingPublicKey, message.bytes(), signature) === null, 'acceptance signature');
+    return { fields: message.fields, message: hex(message.bytes()), signature: hex(signature) };
+  };
+  return {
+    signer: { userId: OWNER_ID, keyVersion: 2 },
+    vault: { vaultId: VAULT_ID, ...signed(vault) },
+    inviter: { inviterUserId: BOB_ID, ...signed(inviter) },
   };
 }
 
@@ -1844,6 +2056,12 @@ function vaultLogVectors(entries, trusted) {
   checkpointTampered[4] = { ...checkpointTampered[4], checkpointLeaves: checkpointTampered[4].checkpointLeaves.slice(0, 1) };
   negative('checkpoint-leaves-mismatch', checkpointTampered, 'bad_checkpoint', 5, 'the served leaves do not give the signed root');
 
+  // Leaves that name a section twice, signed by their author: the root matches, the list is refused.
+  const twice = [...at(5).checkpointLeaves, at(5).checkpointLeaves[0]].sort(compareSections);
+  negative('checkpoint-leaves-name-a-section-twice', variant(entries.slice(0, 5), 5, {
+    checkpoint: treeHash(twice.map((l) => leafHash(leafData(l)))), checkpointLeaves: twice,
+  }, ownerV1), 'bad_checkpoint', 5, 'a checkpoint holds at most one leaf per section, even under a valid signature');
+
   return {
     description:
       'Vault log (PROTOCOL.md §7). Rebuild each message from `entry` and `previousHash`, compare with `message`, check the chain, ' +
@@ -1874,6 +2092,7 @@ function sectionVectors(entries, writes, trusted) {
     'bob-after-demotion': 'not_an_editor',
     'carol-viewer': 'not_an_editor',
     'owner-not-a-head': 'not_a_head',
+    'owner-forked-not-a-head': 'fork',
     'owner-stale-key': 'wrong_key_version',
     'owner-replaced-keys': 'not_an_editor',
     'bob-general-2-fork': 'not_in_checkpoint',

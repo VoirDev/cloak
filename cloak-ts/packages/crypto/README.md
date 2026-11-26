@@ -8,13 +8,13 @@ a client computes and checks around the server. No network, no storage, no frame
 | User ids     | `cloakUserId` (UUIDv5 of the host's user id, §5.0), `uuidV5`                                                                                                                                                                                  |
 | Identity     | `createIdentity`, `replaceIdentityKeys`, `deriveMasterKey` (Argon2id where a `PasswordHasher` says, `derivePasswordKey` by default), `wipeIdentitySecrets`, `seal`/`openPrivateKeyBundle`, `seal`/`openRecoveryKeyBundle`, `encryptionKeyFor` |
 | Key versions | `keysDigest`, `fingerprint`, `signKeyStatement`, `verifyKeyStatement`, `followKeyChain`                                                                                                                                                       |
-| Credentials  | `credentialsMessage`, `identityDeletionMessage`, `signIdentityStatement`, `verifyIdentityStatement` (signed credentials changes and account deletions, §5.4, §5.7)                                                                            |
+| Credentials  | `credentialsMessage`, `identityDeletionMessage`, `vaultAcceptanceMessage`, `inviterAcceptanceMessage`, `signIdentityStatement`, `verifyIdentityStatement` (signed credentials changes, account deletions and acceptances, §5.4, §5.7, §9)     |
 | Vault keys   | `generateVaultKey`, `contentKey`, `keyCommitment`, `requireCommittedKey`, `seal`/`openEnvelope` (HPKE), `wrap`/`unwrapPreviousKey`                                                                                                            |
-| Vault log    | `logMessage`, `entryHash`, `signLogEntry`, `replayVaultLog` (a compact state that continues a snapshot), `logHead`, `membershipAt`, `sharedSince`                                                                                             |
+| Vault log    | `logMessage`, `entryHash`, `signLogEntry`, `replayVaultLog` (a compact state that continues a snapshot), `logHead`, `addedBy`, `membershipAt`, `sharedSince`                                                                                  |
 | Nodes        | `nodeIdOf`, `derivesNode`, `isValidNodeKey`, `parseSectionScope`, `formatSectionScope` (§7.7, §8.1)                                                                                                                                           |
 | Checkpoints  | `checkpointRoot`, `leafHash`, `auditPath`, `verifyInclusion`, `verifyAbsence`, `resolveCheckpointProof`                                                                                                                                       |
 | Sections     | `encryptSection`, `decryptSection` (padded to 256-byte blocks), `sectionWriteMessage`, `toSectionHeader`, `signSectionWrite`, `verifySectionStanding` (from a header), `openSectionContent`, `checkSectionOrder`                              |
-| Signatures   | `sign`, `checkSignature` (strict RFC 8032), `verify`, `isSmallOrderKey`                                                                                                                                                                       |
+| Signatures   | `sign`, `checkSignature` (strict RFC 8032, cofactorless), `verify`, `checkSigningKey`, `checkEncryptionKey`, `isSmallOrderKey`                                                                                                                |
 | Codes        | `toSecretKeyCode`, `toRecoveryKeyCode` and their parsers, `toFingerprintCode`                                                                                                                                                                 |
 | Local state  | `deriveLocalRecordKey`, `sealLocalRecord`, `openLocalRecord`                                                                                                                                                                                  |
 
@@ -50,9 +50,10 @@ the protocol specifies.
 ## Tests
 
 `pnpm test` checks every file of `cloak-protocol/test-vectors/v1` byte for byte and verdict for
-verdict: canonical encoding, codes, key derivation, encrypted and sealed blobs through the
-functions that make them, strict signatures, key statements and their chains, the scenario vault
-log with each of its negative logs, checkpoint trees and proofs, and every section write with its
-expected reason. The same vectors are verified independently by the JDK verifier in
+verdict: canonical encoding, codes, user and node ids, key derivation and its limits, local record
+keys, encrypted and sealed blobs through the functions that make them, strict signatures, key
+statements and their chains, signed credentials changes and acceptances, the scenario vault log with
+each of its negative logs, checkpoint trees and proofs, and every section write with its expected
+reason, with the section marks. The same vectors are verified independently by the JDK verifier in
 `cloak-protocol/tools` and by the Kotlin server, so the implementations agree. Apps use it through
 `@voirdev/cloak-client` ([docs/client.md](../../../docs/client.md)).

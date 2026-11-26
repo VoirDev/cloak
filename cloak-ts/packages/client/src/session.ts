@@ -9,6 +9,7 @@ import {
   openSectionContent,
   equalBytes,
   fingerprint,
+  fromBase64Url,
   generateVaultKey,
   keyCommitment,
   keysDigest,
@@ -33,6 +34,8 @@ import {
   nodeIdOf,
   sharedSince,
   signIdentityStatement,
+  inviterAcceptanceMessage,
+  vaultAcceptanceMessage,
   type NodeOrigin,
   type VaultLogState,
 } from '@voirdev/cloak-crypto';
@@ -42,6 +45,8 @@ import { CloakApiError, isCloakApiError } from './CloakApiError.ts';
 import { originOf } from './nodeRef.ts';
 import { createSessionGate } from './sessionGate.ts';
 import { CheckpointIndex, queryKey, type CheckpointQuery } from './checkpointIndex.ts';
+import { FeedRead } from './FeedRead.ts';
+import { fitsOnePage, sectionLimits } from './limits.ts';
 import { CloakFingerprintRequiredError } from './CloakFingerprintRequiredError.ts';
 import { CloakKeyUnavailableError } from './CloakKeyUnavailableError.ts';
 import { CloakSectionError, type CloakSectionErrorReason } from './CloakSectionError.ts';
@@ -78,7 +83,11 @@ import {
   toWireEntry,
   toWireWrite,
   validHeader,
-  isFeedRangeSound,
+  takeListed,
+  validBatchWrite,
+  validIdentity,
+  validNodeSections,
+  validVaultPage,
   validHeaderPage,
   validLatestHeaders,
   validSectionPage,
@@ -109,8 +118,9 @@ export interface CloakSession {
   close(): Promise<void>;
 
   /**
-   * Returns the fingerprint of a person's newest key version this device trusts, pinning them on
-   * first use. Compare it with the person out of band.
+   * Returns the fingerprint of a person's newest key version: the newest this device trusts when
+   * it pinned them, otherwise the newest of the key chain the server serves, verified from version
+   * 1 without pinning them. Compare it with the person out of band.
    */
   fingerprintOf(hostUserId: string): Promise<string>;
 
@@ -186,7 +196,11 @@ export interface CloakSession {
 
   /**
    * Deletes a vault with an owner's signed `vault_deleted` (`PROTOCOL.md` §12.3); the server keeps
-   * only its log. This device then forgets it, keeping its verified head.
+   * only its log. This device then reads the log again and forgets the vault, keeping its
+   * verified head, once the log shows that very deletion.
+   *
+   * @throws {CloakVaultLogError} `state_mismatch` when the server answered but its log does not
+   *   show the deletion; the device then keeps everything it holds about the vault.
    */
   deleteVault(vaultId: string): Promise<void>;
 
@@ -201,8 +215,8 @@ export interface CloakSession {
   /**
    * Adds a person with a role, sealing the current key to their newest keys.
    *
-   * @throws {CloakFingerprintRequiredError} when this device never met them and their fingerprint
-   *   was not confirmed.
+   * @throws {CloakFingerprintRequiredError} when nothing vouches for their keys: the user never
+   *   confirmed their fingerprint, and no vault the user accepted commits them (`PROTOCOL.md` §9).
    */
   addMember(vaultId: string, hostUserId: string, role: Role): Promise<VerifiedVault>;
 
@@ -258,7 +272,11 @@ export interface CloakSession {
     options?: { readonly removeDeleted?: boolean },
   ): Promise<readonly VerifiedVault[]>;
 
-  /** Leaves a vault; it keeps its key until an admin rotates. This device then forgets it. */
+  /**
+   * Leaves a vault; the user keeps knowing its key until an admin rotates. This device then
+   * forgets the vault but keeps the departure it signed as the vault's head, so it accepts no later
+   * history of the vault that does not hold the departure (`PROTOCOL.md` §15).
+   */
   leave(vaultId: string): Promise<void>;
 
   /**
@@ -270,8 +288,8 @@ export interface CloakSession {
   deliverEnvelopes(vaultId: string): Promise<number>;
 
   /**
-   * Records this user's newest keys in a vault (`PROTOCOL.md` §5.6). `replaceKeys` does it in
-   * every vault; call it again for a vault where it failed.
+   * Records this user's newest keys in a vault (`PROTOCOL.md` §5.6). A completed key replacement
+   * does it in every vault; call it again for a vault where it failed.
    */
   recordKeyReplacement(vaultId: string): Promise<KeyReplacementRecord>;
 
@@ -310,22 +328,24 @@ export interface CloakSession {
 
   /**
    * Deletes the user's account (`PROTOCOL.md` §5.7): deletes every vault where the user is the
-   * only member who is not deleted, leaves every other one, deletes the identity and clears
-   * everything this device keeps for the user, the secret key included. The session is unusable
-   * afterwards.
+   * only member, leaves every other one, deletes the identity and clears everything this device
+   * keeps for the user, the secret key included. The session is unusable afterwards.
    *
-   * Nothing is changed while the user is the only owner of a vault that has other members. Vaults
-   * the user never accepted are not left: they do not hold the deletion up (`PROTOCOL.md` §5.7).
+   * A vault whose other members the server all marks deleted is neither left nor deleted: the mark
+   * is unsigned and may only make this device do less, and the server deletes such a vault, which
+   * has no living member left, with the identity. Nothing is changed while the user is the only
+   * owner of a vault that has other members who are not deleted. Vaults the user never accepted
+   * are not left: they do not hold the deletion up (`PROTOCOL.md` §5.7).
    *
    * @throws {CloakAccountNotEmptyError} naming those vaults; appoint another owner first.
    */
   deleteAccount(): Promise<void>;
 
   /**
-   * Writes up to 100 sections in any of the user's vaults, together or not at all, in two
-   * requests: one reads the latest write headers of every section, the other writes. The write
-   * must fit the server's `maxRequestBytes` (`GET /meta`); a larger one fails with
-   * `payload_too_large`, and nothing is written.
+   * Writes up to 100 sections in any of the user's vaults, together or not at all. After verifying
+   * each vault's log it sends two requests: one reads the latest write headers of every section,
+   * the other writes. The write must fit the server's `maxRequestBytes` (`GET /meta`); a larger
+   * one fails with `payload_too_large`, and nothing is written.
    */
   writeSections(changes: readonly SectionChange[]): Promise<readonly SectionInfo[]>;
 
@@ -353,18 +373,40 @@ export interface SessionContext {
   readonly self: Self & { readonly keys: PublicKeys };
 }
 
+/** An entry this device signed. */
+interface OwnEntry {
+  /** Its vault. */
+  readonly vaultId: string;
+  /** Its `seq`. */
+  readonly seq: number;
+  /** Its `entryHash`. */
+  readonly hash: Uint8Array;
+}
+
 /** Entries a change signed, kept as this device's own once the server accepts them. */
-type OwnEntries = { vaultId: string; hash: Uint8Array }[];
+type OwnEntries = OwnEntry[];
+
+/**
+ * The last entry a change signed.
+ *
+ * @param own What the change signed.
+ * @returns The entry.
+ */
+function lastSigned(own: OwnEntries): OwnEntry {
+  const last = own.at(-1);
+  if (last === undefined) throw new RangeError('The change signed nothing');
+  return last;
+}
 
 /** How long a signed identity deletion stays valid (`PROTOCOL.md` §5.7), in seconds. */
 const DELETION_WINDOW_SECONDS = 300;
 
-/** How many times a write is redone after another device moved the log or rotated the key. */
+/** How many times in all a change is tried when another device moved the log or rotated the key. */
 const RETRIES = 3;
 
 /**
- * How many times a checkpoint is built again after writes slipped in. Each retry reads only the
- * headers written since, so it is quick, and a busy vault gets more tries.
+ * How many times in all a change with a checkpoint is tried when writes slipped in. Each retry
+ * reads only the headers written since, so it is quick, and a busy vault gets more tries.
  */
 const CHECKPOINT_RETRIES = 6;
 
@@ -425,9 +467,9 @@ function sectionAddress(ref: Schemas['SectionRef']): string {
 export function createSession(context: SessionContext): CloakSession {
   const { api, local, keyring, self } = context;
   const book = new VaultBook(api, keyring, local, self);
-  const index = new CheckpointIndex(api);
-  /** The latest change number this session read for each vault. */
-  const seenChange = new Map<string, number>();
+  /** The server's section limits, which bound what one read of a vault may hold. */
+  const limits = sectionLimits(api);
+  const index = new CheckpointIndex(api, limits);
   /** Checkpoint drafts by vault. */
   const drafts = new Map<string, CheckpointDraft>();
   /** Vaults whose writes this session paused and the server may still hold paused. */
@@ -441,9 +483,14 @@ export function createSession(context: SessionContext): CloakSession {
    */
   async function forget(vaultId: string, keepHead: boolean): Promise<void> {
     book.forget(vaultId);
-    seenChange.delete(vaultId);
+    index.forget(vaultId);
     drafts.delete(vaultId);
     await local.forgetVault(vaultId, keepHead);
+  }
+
+  /** A new read of a vault's change feed after [afterChange]; see {@link FeedRead}. */
+  async function feedRead(vaultId: string, afterChange: number): Promise<FeedRead> {
+    return new FeedRead(vaultId, afterChange, await limits());
   }
 
   /**
@@ -517,8 +564,16 @@ export function createSession(context: SessionContext): CloakSession {
 
   /** Signs entry fields, noting the entry in [own] to keep once the server accepts it. */
   function signEntry(fields: LogEntryFields, own: OwnEntries): Schemas['LogEntryInput'] {
-    own.push({ vaultId: fields.vaultId, hash: entryHash(fields) });
+    own.push({ vaultId: fields.vaultId, seq: fields.seq, hash: entryHash(fields) });
     return toWireEntry(fields, signLogEntry(fields, self.secrets.signingSeed));
+  }
+
+  /** An acceptance (`PROTOCOL.md` §9) signed with the user's current keys, as the API takes it. */
+  function signedAcceptance(message: Uint8Array): Schemas['Acceptance'] {
+    return {
+      keyVersion: self.keyVersion,
+      signature: toBase64Url(signIdentityStatement(message, self.secrets.signingSeed)),
+    };
   }
 
   /** The member's committed keys in [record], or fails. */
@@ -532,44 +587,37 @@ export function createSession(context: SessionContext): CloakSession {
     return member;
   }
 
-  /** Reads one page of a vault's sections in change order. */
-  async function feed(vaultId: string, afterChange: number): Promise<Schemas['SectionPage']> {
-    const page = validSectionPage(
+  /** Reads the next page of a vault's sections in change order, for [read] to take in. */
+  async function feed(vaultId: string, read: FeedRead): Promise<Schemas['SectionPage']> {
+    const { after } = read;
+    return validSectionPage(
       await body(
         api.GET('/vaults/{vaultId}/sections', {
           params: {
             path: { vaultId },
-            query: { ...(afterChange === 0 ? {} : { afterChange }), limit: 100 },
+            query: { ...(after === 0 ? {} : { afterChange: after }), limit: 100 },
           },
         }),
       ),
     );
-    if (!isFeedRangeSound(page, afterChange))
-      throw new CloakVaultLogError(vaultId, 'state_mismatch');
-    seenChange.set(vaultId, page.lastChangeSeq);
-    return page;
   }
 
-  /** Reads one page of a vault's section headers in change order. */
+  /** Reads the next page of a vault's section headers in change order, for [read] to take in. */
   async function headerFeed(
     vaultId: string,
-    afterChange: number,
-    limit = HEADER_PAGE,
+    read: FeedRead,
   ): Promise<Schemas['SectionHeaderPage']> {
-    const page = validHeaderPage(
+    const { after } = read;
+    return validHeaderPage(
       await body(
         api.GET('/vaults/{vaultId}/section-headers', {
           params: {
             path: { vaultId },
-            query: { ...(afterChange === 0 ? {} : { afterChange }), limit },
+            query: { ...(after === 0 ? {} : { afterChange: after }), limit: HEADER_PAGE },
           },
         }),
       ),
     );
-    if (!isFeedRangeSound(page, afterChange))
-      throw new CloakVaultLogError(vaultId, 'state_mismatch');
-    seenChange.set(vaultId, page.lastChangeSeq);
-    return page;
   }
 
   /**
@@ -621,7 +669,14 @@ export function createSession(context: SessionContext): CloakSession {
     const answers = await index.lookup(vaultId, queries);
 
     const verdicts: Standing[] = [];
-    for (const { header } of served) {
+    const standingWriters = new Set<string>();
+    for (const { wire, header, signatureVerified } of served) {
+      // The hash a write is known by is computed here, never taken from the server.
+      const hash = headerWriteHash(header);
+      if (!equalBytes(fromBase64Url(wire.writeHash), hash)) {
+        verdicts.push({ ok: false, reason: 'bad_write_hash' });
+        continue;
+      }
       const key: SectionKey = {
         vaultId,
         nodeId: header.nodeId,
@@ -639,7 +694,7 @@ export function createSession(context: SessionContext): CloakSession {
       const mark = await local.mark(key);
       // Rule 4 covers every write this device had not verified before (`PROTOCOL.md` §7.6, §8.4);
       // the section's mark tells whether it verified this very write.
-      const seenBefore = mark !== undefined && equalBytes(mark.writeHash, headerWriteHash(header));
+      const seenBefore = mark !== undefined && equalBytes(mark.writeHash, hash);
       const result = verifySectionStanding(header, state, {
         keysOf: (userId, keyVersion) => keyring.keysOf(userId, keyVersion),
         isSuperseded: seenBefore
@@ -647,7 +702,7 @@ export function createSession(context: SessionContext): CloakSession {
           : (userId, keyVersion) =>
               book.isSuperseded(state.recordedKeyVersions, userId, keyVersion),
         checkpointLeaves,
-        signatureVerified: served[verdicts.length]?.signatureVerified,
+        signatureVerified,
       });
       if (!result.ok) {
         verdicts.push(result);
@@ -663,22 +718,32 @@ export function createSession(context: SessionContext): CloakSession {
         continue;
       }
       await local.raiseMark(key, { dataVersion: header.dataVersion, writeHash: result.writeHash });
+      standingWriters.add(header.writerUserId);
       verdicts.push(result);
     }
+    // Writers are met through writes that stand, never through what the server merely served.
+    await keyring.pin(standingWriters);
     return verdicts;
   }
 
-  /** Reads and checks served writes of one vault: their standing, then their content. */
+  /**
+   * Reads and checks served writes of one vault: their standing, then their content.
+   *
+   * @param kept How many of the first [wires] come from this device's sealed section cache, whose
+   *   signatures it verified when it first read them (§15); every other write is checked in full.
+   */
   async function readWrites(
     vaultId: string,
     wires: readonly Schemas['SectionWrite'][],
-    verified: ReadonlySet<string> = new Set(),
+    kept = 0,
   ): Promise<DecryptedSection[]> {
-    const decoded = wires.map((wire) => ({ wire, opened: fromWireWrite(wire) }));
-    const judged = decoded.flatMap(({ wire, opened }) =>
-      opened === undefined
-        ? []
-        : [{ wire, header: opened.header, signatureVerified: verified.has(wire.writeHash) }],
+    const decoded = wires.map((wire, position) => ({
+      wire,
+      opened: fromWireWrite(wire),
+      signatureVerified: position < kept,
+    }));
+    const judged = decoded.flatMap(({ wire, opened, signatureVerified }) =>
+      opened === undefined ? [] : [{ wire, header: opened.header, signatureVerified }],
     );
     const verdicts = await judge(vaultId, judged);
     const record = await book.verify(vaultId, false);
@@ -725,8 +790,11 @@ export function createSession(context: SessionContext): CloakSession {
       draft = { logSeq: head, lastChange: 0, writes: new Map() };
       drafts.set(vaultId, draft);
     }
+    const read = await feedRead(vaultId, draft.lastChange);
+    const { stored } = await limits();
     for (;;) {
-      const page = await headerFeed(vaultId, draft.lastChange);
+      const page = await headerFeed(vaultId, read);
+      const done = read.take(page);
       requirePlace(vaultId, page.items, { vaultId });
       const served = page.items.map((wire) => ({ wire, header: fromWireHeader(wire) }));
       const verdicts = await judge(vaultId, served);
@@ -740,8 +808,10 @@ export function createSession(context: SessionContext): CloakSession {
       });
       for (const removal of page.removed)
         draft.writes.delete(`${removal.nodeId}/${removal.sectionName}`);
+      // Kept across reads, the draft too holds no more sections than a vault stores.
+      if (draft.writes.size > stored) throw new CloakVaultLogError(vaultId, 'state_mismatch');
       draft.lastChange = page.throughChangeSeq;
-      if (page.throughChangeSeq >= page.lastChangeSeq) return draft;
+      if (done) return draft;
     }
   }
 
@@ -840,25 +910,39 @@ export function createSession(context: SessionContext): CloakSession {
   }
 
   /**
-   * Where a vault stands. The verified head and key version come from the signed log, so a
-   * server cannot fake a move; the latest change number is only the server's word, so it counts
-   * only for `checkpoint_conflict`, which a new section write causes without moving the log.
+   * Where a vault stands by its signed log: the verified head and key version, which a server
+   * cannot fake.
    */
-  function positionOf(
-    vaultId: string,
-    record: VaultRecord | undefined,
-    withChanges: boolean,
-  ): string {
+  function positionOf(record: VaultRecord | undefined): string {
     const head = record === undefined ? undefined : logHead(record.state);
-    const changes = withChanges ? `/${String(seenChange.get(vaultId))}` : '';
-    return `${String(head?.seq)}/${String(head?.keyVersion)}${changes}`;
+    return `${String(head?.seq)}/${String(head?.keyVersion)}`;
+  }
+
+  /**
+   * The latest writes a vault's checkpoint draft judged, with their verdicts, as one key; absent
+   * without a draft. A checkpoint is built from them alone, so it can come out otherwise only when
+   * they change.
+   */
+  function draftedWritesOf(vaultId: string): string | undefined {
+    const draft = drafts.get(vaultId);
+    if (draft === undefined) return undefined;
+    return [...draft.writes]
+      .map(
+        ([key, { served, standing }]) =>
+          `${key}=${toBase64Url(headerWriteHash(served.header))}/${String(standing.ok)}`,
+      )
+      .sort()
+      .join(',');
   }
 
   /**
    * Runs a change against fresh state, redoing it when another device moved the vaults first.
-   * Before signing again, it checks that a vault really moved: otherwise a server could claim
-   * conflicts to collect several validly signed versions of one change. Entries the change
-   * signed are kept as this device's own once the server accepted them.
+   * Before signing again, it checks what the signed data shows moved: the verified log for every
+   * conflict, and, for a `checkpoint_conflict`, which a new section write causes without moving
+   * the log, the latest writes read again since the draft and judged. A conflict the server
+   * claims without either is thrown, so it cannot collect several validly signed versions of one
+   * change. Entries the change signed are kept as this device's own once the server accepted
+   * them.
    */
   async function retrying<T>(
     vaultIds: readonly string[],
@@ -886,10 +970,15 @@ export function createSession(context: SessionContext): CloakSession {
         }
         let moved = false;
         for (const vaultId of vaultIds) {
-          const before = positionOf(vaultId, await book.verify(vaultId, false), withChanges);
-          const record = await book.verify(vaultId);
-          if (withChanges) await headerFeed(vaultId, seenChange.get(vaultId) ?? 0, 1);
-          if (positionOf(vaultId, record, withChanges) !== before) moved = true;
+          const before = positionOf(await book.verify(vaultId, false));
+          if (positionOf(await book.verify(vaultId)) !== before) {
+            moved = true;
+            continue;
+          }
+          const drafted = withChanges ? draftedWritesOf(vaultId) : undefined;
+          if (drafted === undefined) continue;
+          await readDraft(vaultId);
+          if (draftedWritesOf(vaultId) !== drafted) moved = true;
         }
         if (!moved) {
           await releasePauses(vaultIds);
@@ -897,6 +986,43 @@ export function createSession(context: SessionContext): CloakSession {
         }
       }
     }
+  }
+
+  /**
+   * Signs a vault's acceptance again with the current keys after a key replacement, when this
+   * device signed the one the view carries (`PROTOCOL.md` §5.6 step 6), and verifies the vault
+   * again so it vouches.
+   *
+   * @returns `false` when an older acceptance stays unsigned because this device did not make it.
+   */
+  async function renewAcceptance(vaultId: string, record: VaultRecord): Promise<boolean> {
+    const { acceptance } = record.view;
+    if (acceptance === undefined || acceptance.keyVersion >= self.keyVersion) return true;
+    const mine = await local.ownAcceptances();
+    const inviterUserId = acceptance.inviterUserId;
+    if (inviterUserId === undefined) {
+      if (!mine.vaultIds.includes(vaultId)) return false;
+      await noBody(
+        api.PUT('/vaults/{vaultId}/acceptance', {
+          params: { path: { vaultId } },
+          body: signedAcceptance(vaultAcceptanceMessage(self.userId, self.keyVersion, vaultId)),
+        }),
+      );
+    } else {
+      if (!mine.inviterUserIds.includes(inviterUserId)) return false;
+      await noBody(
+        api.POST('/invitations/acceptance', {
+          body: {
+            inviterUserId,
+            ...signedAcceptance(
+              inviterAcceptanceMessage(self.userId, self.keyVersion, inviterUserId),
+            ),
+          },
+        }),
+      );
+    }
+    await book.verify(vaultId);
+    return true;
   }
 
   /** Keeps entries the server accepted as this device's own. */
@@ -947,11 +1073,12 @@ export function createSession(context: SessionContext): CloakSession {
     const kept = buckets.map((bucket) => new Map(Object.entries(bucket.sections)));
     const dirty = new Set<number>();
 
-    let after = Math.min(...buckets.map((bucket) => bucket.through));
+    const read = await feedRead(vaultId, Math.min(...buckets.map((bucket) => bucket.through)));
     const fresh = new Map<string, Schemas['SectionWrite']>();
-    let page: Schemas['SectionPage'];
-    do {
-      page = await feed(vaultId, after);
+    let done = false;
+    while (!done) {
+      const page = await feed(vaultId, read);
+      done = read.take(page);
       requirePlace(vaultId, page.items, { vaultId });
       // Writes and removals apply in change order, so the later of the two wins.
       const events = [
@@ -972,13 +1099,13 @@ export function createSession(context: SessionContext): CloakSession {
         const bucket = bucketOf(key);
         if (kept[bucket]?.delete(key) === true) dirty.add(bucket);
       }
-      after = page.throughChangeSeq;
-    } while (page.throughChangeSeq < page.lastChangeSeq);
-    const { lastChangeSeq } = page;
+    }
+    // Every bucket is complete through where the read ended.
+    const lastChangeSeq = read.after;
 
     // What to judge: new writes in full, kept ones only when a checkpoint came since they were.
+    // Kept writes go first: their signatures were verified when this device first read them.
     const toRead: Schemas['SectionWrite'][] = [];
-    const verified = new Set<string>();
     const settled: DecryptedSection[] = [];
     for (const [bucket, sections] of kept.entries()) {
       const judgedAt = buckets[bucket]?.judgedAt ?? 0;
@@ -1003,18 +1130,18 @@ export function createSession(context: SessionContext): CloakSession {
           continue;
         }
         if (rejudge) dirty.add(bucket);
-        verified.add(write.writeHash);
         toRead.push(write);
       }
     }
+    const checkedBefore = toRead.length;
     for (const [key, write] of fresh) {
       dirty.add(bucketOf(key));
       toRead.push(write);
     }
 
-    const read = await readWrites(vaultId, toRead, verified);
+    const judged = await readWrites(vaultId, toRead, checkedBefore);
     const sections: DecryptedSection[] = [...settled];
-    read.forEach((section, position) => {
+    judged.forEach((section, position) => {
       const write = toRead[position];
       if (write === undefined) throw new RangeError('A write was not read');
       const key = `${write.nodeId}/${write.sectionName}`;
@@ -1203,15 +1330,27 @@ export function createSession(context: SessionContext): CloakSession {
   }
 
   /**
-   * Checks where [change] goes against its vault's freshly verified log: rule 6 before anything is
-   * encrypted or even asked about, so content goes only where the owner put the node, whatever the
-   * application or the server says (§8.3). A deletion carries nothing to read.
+   * Checks [change] against its vault's freshly verified log before anything is encrypted or even
+   * asked about (§8.3): that the user may write there, as an editor whose current keys the log
+   * commits, since readers refuse any other write (rule 3) and a server could still accept it; and
+   * rule 6, so content goes only where the owner put the node, whatever the application or the
+   * server says. A deletion carries nothing to read.
    */
   async function place(change: SectionChange, fresh: Map<string, VaultRecord>): Promise<Placed> {
     const record = fresh.get(change.vaultId) ?? (await book.verify(change.vaultId));
     fresh.set(change.vaultId, record);
     const origin = originOf(change.node);
     const nodeId = nodeIdOf(origin);
+    const me = record.state.members.get(self.userId);
+    if (
+      me === undefined ||
+      !roleIncludes(me.role, 'editor') ||
+      me.keyVersion !== self.keyVersion ||
+      !equalBytes(me.keysDigest, keysDigest(self.keys))
+    ) {
+      // Readers give one reason for both: the keys were not committed for an editor (§8.4).
+      throw new CloakSectionError(change.vaultId, nodeId, change.name, 'not_an_editor');
+    }
     if (
       change.content !== undefined &&
       !livesIn(record.state, change.vaultId, nodeId, origin, change.name)
@@ -1267,6 +1406,9 @@ export function createSession(context: SessionContext): CloakSession {
   ): Promise<{ readonly wire: Schemas['SectionWriteInput']; readonly fields: SectionWriteFields }> {
     const head = logHead(record.state);
     const deleted = change.content === undefined;
+    // No honest section reaches this version, and the next one could not be counted exactly.
+    if (latest !== undefined && latest.dataVersion >= Number.MAX_SAFE_INTEGER)
+      throw new CloakVaultLogError(change.vaultId, 'state_mismatch');
     // Never chain onto a write older than one this device saw, or another of the same version.
     const mark = await local.mark({ vaultId: change.vaultId, nodeId, sectionName: change.name });
     if (mark !== undefined) {
@@ -1384,17 +1526,19 @@ export function createSession(context: SessionContext): CloakSession {
         );
         return [await remember(written, fields)];
       }
-      const response = await body(
-        api.POST('/sections/batch-write', {
-          body: {
-            items: prepared.map(({ wire, fields }) => ({
-              ...wire,
-              vaultId: fields.vaultId,
-              nodeId: fields.nodeId,
-              sectionName: fields.sectionName,
-            })),
-          },
-        }),
+      const response = validBatchWrite(
+        await body(
+          api.POST('/sections/batch-write', {
+            body: {
+              items: prepared.map(({ wire, fields }) => ({
+                ...wire,
+                vaultId: fields.vaultId,
+                nodeId: fields.nodeId,
+                sectionName: fields.sectionName,
+              })),
+            },
+          }),
+        ),
       );
       if (response.items.length !== prepared.length)
         throw new CloakVaultLogError(changes[0]?.vaultId ?? '', 'state_mismatch');
@@ -1432,16 +1576,18 @@ export function createSession(context: SessionContext): CloakSession {
     },
 
     async listVaults(options = {}) {
-      const page = await body(
-        api.GET('/vaults', {
-          params: {
-            query: {
-              ...(options.limit === undefined ? {} : { limit: options.limit }),
-              ...(options.cursor === undefined ? {} : { cursor: options.cursor }),
-              ...(options.pending === true ? { pending: true } : {}),
+      const page = validVaultPage(
+        await body(
+          api.GET('/vaults', {
+            params: {
+              query: {
+                ...(options.limit === undefined ? {} : { limit: options.limit }),
+                ...(options.cursor === undefined ? {} : { cursor: options.cursor }),
+                ...(options.pending === true ? { pending: true } : {}),
+              },
             },
-          },
-        }),
+          }),
+        ),
       );
       // Names of who added the user, without trusting anyone's keys for it.
       await keyring.learnNames(
@@ -1494,17 +1640,21 @@ export function createSession(context: SessionContext): CloakSession {
             id: vaultId,
             keyEnvelope: toBase64Url(envelope),
             log: signEntry(fields, created),
+            acceptance: signedAcceptance(
+              vaultAcceptanceMessage(self.userId, self.keyVersion, vaultId),
+            ),
           },
         }),
       );
       await keepOwn(created);
+      await local.addOwnAcceptance('vault', vaultId);
       return reopen(vaultId);
     },
 
     openVault: reopen,
 
     async deleteVault(vaultId) {
-      await retrying([vaultId], async (own) => {
+      const signed = await retrying([vaultId], async (own) => {
         const record = await book.verify(vaultId);
         const log = nextEntry(record, own, {
           kind: 'vault_deleted',
@@ -1514,20 +1664,42 @@ export function createSession(context: SessionContext): CloakSession {
         await noBody(
           api.POST('/vaults/{vaultId}/deletion', { params: { path: { vaultId } }, body: { log } }),
         );
+        return lastSigned(own);
       });
+      // The server's answer is only its word: the vault is forgotten on the signed fact alone,
+      // which a deleted vault's log still shows its members (§12.3, §15).
+      const { state } = await book.verify(vaultId);
+      const point = state.points[signed.seq - 1];
+      if (!state.deleted || point === undefined || !equalBytes(point.hash, signed.hash))
+        throw new CloakVaultLogError(vaultId, 'state_mismatch');
       await forget(vaultId, true);
     },
 
     async acceptVault(vaultId) {
-      await noBody(api.PUT('/vaults/{vaultId}/acceptance', { params: { path: { vaultId } } }));
+      await noBody(
+        api.PUT('/vaults/{vaultId}/acceptance', {
+          params: { path: { vaultId } },
+          body: signedAcceptance(vaultAcceptanceMessage(self.userId, self.keyVersion, vaultId)),
+        }),
+      );
+      await local.addOwnAcceptance('vault', vaultId);
+      // Verified again at once, so the vault vouches for its members from now on (§9).
+      await book.verify(vaultId);
     },
 
     async acceptInvitationsFrom(hostUserId) {
+      const inviterUserId = cloakUserId(hostUserId);
       await noBody(
         api.POST('/invitations/acceptance', {
-          body: { inviterUserId: cloakUserId(hostUserId) },
+          body: {
+            inviterUserId,
+            ...signedAcceptance(
+              inviterAcceptanceMessage(self.userId, self.keyVersion, inviterUserId),
+            ),
+          },
         }),
       );
+      await local.addOwnAcceptance('inviter', inviterUserId);
     },
 
     async createNode(homeVaultId, nodeKey) {
@@ -1623,13 +1795,18 @@ export function createSession(context: SessionContext): CloakSession {
     async deleteAccount() {
       // Accepted vaults are left or deleted first. Vaults the user never accepted do not hold the
       // deletion up: the server drops their envelopes, and their admins remove the member (§5.7).
-      const vaultIds: string[] = [];
+      const listed = new Set<string>();
       let cursor: string | undefined;
       do {
         const page = await session.listVaults(cursor === undefined ? {} : { cursor });
-        vaultIds.push(...page.items.map((vault) => vault.id));
         cursor = page.nextCursor;
+        takeListed(
+          listed,
+          page.items.map((vault) => vault.id),
+          cursor !== undefined,
+        );
       } while (cursor !== undefined);
+      const vaultIds = [...listed];
 
       // Decide every vault first, so nothing changes when one blocks the deletion.
       const deletions: string[] = [];
@@ -1643,9 +1820,13 @@ export function createSession(context: SessionContext): CloakSession {
           others.map(([userId]) => userId),
           true,
         );
-        // A deleted member can never act again, so they do not count as someone left behind.
+        // Whether others are deleted is the server's unsigned mark, which may only make this
+        // device do less (§5.7): nothing is signed for a vault whose other members are all
+        // marked deleted, which the server deletes with the identity as a vault without a living
+        // member. Only a vault without any other member is deleted with a signature.
         const living = others.filter(([userId]) => !keyring.isDeleted(userId));
-        if (me.role === 'owner' && living.length === 0) deletions.push(vaultId);
+        if (others.length === 0) deletions.push(vaultId);
+        else if (living.length === 0) continue;
         else if (me.role === 'owner' && !living.some(([, member]) => member.role === 'owner'))
           blocking.push(vaultId);
         else departures.push(vaultId);
@@ -1656,7 +1837,7 @@ export function createSession(context: SessionContext): CloakSession {
       for (const vaultId of departures) await session.leave(vaultId);
       // Signed, and only for a few minutes, so neither the host's session alone nor a captured
       // request can delete the account (§5.7).
-      const identity = await body(api.GET('/identity'));
+      const identity = validIdentity(await body(api.GET('/identity')));
       const notAfter = Math.floor(Date.now() / 1000) + DELETION_WINDOW_SECONDS;
       const statement = identityDeletionMessage(
         self.userId,
@@ -1678,7 +1859,9 @@ export function createSession(context: SessionContext): CloakSession {
 
     async addMember(vaultId, hostUserId, role) {
       const userId = cloakUserId(hostUserId);
-      if ((await local.pin(userId)) === undefined) {
+      // Only a vouched pin lets someone be added without a fingerprint (`PROTOCOL.md` §9): a pin
+      // from a vault the user never accepted could hold keys the server chose.
+      if ((await local.pin(userId))?.vouched !== true) {
         const served = await keyring.peek(userId);
         if (served === undefined) throw noIdentity();
         throw new CloakFingerprintRequiredError(hostUserId, fingerprint(served));
@@ -1839,7 +2022,7 @@ export function createSession(context: SessionContext): CloakSession {
     },
 
     async leave(vaultId) {
-      await retrying([vaultId], async (own) => {
+      const departure = await retrying([vaultId], async (own) => {
         const record = await book.verify(vaultId);
         const me = committed(vaultId, record, self.userId);
         const checkpoint = roleIncludes(me.role, 'editor')
@@ -1865,9 +2048,14 @@ export function createSession(context: SessionContext): CloakSession {
             },
           }),
         );
+        return lastSigned(own);
       });
-      // Only once the departure and its own entries are kept, so nothing about the vault but its
-      // verified head stays behind.
+      // The server's answer is only its word, and a former member can no longer read the log to
+      // check it. The departure this device signed, which continues the verified head, becomes the
+      // vault's kept head instead: any log shown later must hold it (§7.6), so a server that only
+      // claimed to apply it is refused as a rollback, and nothing the dropped records guarded can
+      // be read again without it.
+      await local.advanceHead(vaultId, { seq: departure.seq, entryHash: departure.hash });
       await forget(vaultId, true);
     },
 
@@ -1911,6 +2099,7 @@ export function createSession(context: SessionContext): CloakSession {
           return {
             vault: toVerified(vaultId, record),
             unrecognizedEntries: await unrecognized(vaultId, record),
+            unrecognizedAcceptance: !(await renewAcceptance(vaultId, record)),
           };
         }
         const checkpoint = roleIncludes(me.role, 'editor')
@@ -1956,6 +2145,7 @@ export function createSession(context: SessionContext): CloakSession {
         return {
           vault: toVerified(vaultId, after),
           unrecognizedEntries: await unrecognized(vaultId, after),
+          unrecognizedAcceptance: !(await renewAcceptance(vaultId, after)),
         };
       });
     },
@@ -1975,26 +2165,59 @@ export function createSession(context: SessionContext): CloakSession {
     },
 
     async readNode(nodeId) {
-      const node = await body(api.GET('/nodes/{nodeId}', { params: { path: { nodeId } } }));
-      requirePlace(nodeId, node.sections, { nodeId });
-      const byVault = new Map<string, Schemas['SectionWrite'][]>();
-      for (const wire of node.sections) {
-        byVault.set(wire.vaultId, [...(byVault.get(wire.vaultId) ?? []), wire]);
-      }
-      const read = new Map<Schemas['SectionWrite'], DecryptedSection>();
-      // Every vault's log to its head, at once, since where a node lives can change (§7.7).
-      await book.verifyMany([...byVault.keys()]);
-      for (const [vaultId, wires] of byVault) {
-        const checked = await readWrites(vaultId, wires);
-        wires.forEach((wire, position) => {
-          const section = checked[position];
-          if (section !== undefined) read.set(wire, section);
-        });
-      }
-      const sections = node.sections.flatMap((wire) => {
-        const section = read.get(wire);
-        return section === undefined ? [] : [section];
-      });
+      const pageLimits = await limits();
+      const mismatch = (): CloakVaultLogError => new CloakVaultLogError(nodeId, 'state_mismatch');
+      const seen = new Set<string>();
+      const perVault = new Map<string, number>();
+      const verified = new Set<string>();
+      const sections: DecryptedSection[] = [];
+      let cursor: string | undefined;
+      do {
+        const page = validNodeSections(
+          await body(
+            api.GET('/nodes/{nodeId}', {
+              params: { path: { nodeId }, ...(cursor === undefined ? {} : { query: { cursor } }) },
+            }),
+          ),
+        );
+        // The server picks every page, so each must be this node's, keep one page's budget and
+        // move on: a page that promises more brings a section, no section comes twice, and no
+        // vault lists more sections than it stores. Every section is in a vault whose log is
+        // verified below, so the read ends.
+        if (
+          page.nodeId !== nodeId ||
+          !fitsOnePage(page.sections, pageLimits) ||
+          (page.nextCursor !== undefined && page.sections.length === 0)
+        )
+          throw mismatch();
+        requirePlace(nodeId, page.sections, { nodeId });
+        const byVault = new Map<string, Schemas['SectionWrite'][]>();
+        for (const wire of page.sections) {
+          const address = sectionAddress(wire);
+          const count = (perVault.get(wire.vaultId) ?? 0) + 1;
+          if (seen.has(address) || count > pageLimits.stored) throw mismatch();
+          seen.add(address);
+          perVault.set(wire.vaultId, count);
+          byVault.set(wire.vaultId, [...(byVault.get(wire.vaultId) ?? []), wire]);
+        }
+        // Every vault's log to its head, at once, since where a node lives can change (§7.7).
+        const fresh = [...byVault.keys()].filter((vaultId) => !verified.has(vaultId));
+        await book.verifyMany(fresh);
+        for (const vaultId of fresh) verified.add(vaultId);
+        const read = new Map<Schemas['SectionWrite'], DecryptedSection>();
+        for (const [vaultId, wires] of byVault) {
+          const checked = await readWrites(vaultId, wires);
+          wires.forEach((wire, position) => {
+            const section = checked[position];
+            if (section !== undefined) read.set(wire, section);
+          });
+        }
+        for (const wire of page.sections) {
+          const section = read.get(wire);
+          if (section !== undefined) sections.push(section);
+        }
+        cursor = page.nextCursor;
+      } while (cursor !== undefined);
       // §8.1: one node with two types, or one section live in two vaults, is a conflict to show.
       const live = sections.filter((section) => section.status === 'ok');
       const types = new Set(live.map((section) => section.type));
@@ -2016,11 +2239,10 @@ export function createSession(context: SessionContext): CloakSession {
       await book.verify(vaultId);
       const sections = [];
       const removed: SectionRemoval[] = [];
-      let after = afterChange;
-      let lastChangeSeq: number;
+      const read = await feedRead(vaultId, afterChange);
       for (;;) {
-        const page = await feed(vaultId, after);
-        lastChangeSeq = page.lastChangeSeq;
+        const page = await feed(vaultId, read);
+        const done = read.take(page);
         requirePlace(vaultId, page.items, { vaultId });
         sections.push(...(await readWrites(vaultId, page.items)));
         removed.push(
@@ -2030,10 +2252,9 @@ export function createSession(context: SessionContext): CloakSession {
             changeSeq: removal.changeSeq,
           })),
         );
-        if (page.throughChangeSeq >= page.lastChangeSeq) break;
-        after = page.throughChangeSeq;
+        if (done) break;
       }
-      return { sections, removed, lastChangeSeq };
+      return { sections, removed, lastChangeSeq: read.after };
     },
 
     async writeSection(vaultId, node, name, change) {

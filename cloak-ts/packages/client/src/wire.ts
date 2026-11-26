@@ -26,6 +26,43 @@ const uuid = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-
 /** Base64url without padding. */
 const base64 = z.string().regex(/^[A-Za-z0-9_-]*$/);
 
+/** How many bytes a base64url value without padding of [length] characters decodes to. */
+function decodedLength(length: number): number | undefined {
+  return length % 4 === 1 ? undefined : Math.floor((length * 3) / 4);
+}
+
+/**
+ * Base64url of a value whose decoded length passes [fits]: the API states every key, digest,
+ * signature and blob by its exact size, so nothing of another size is decoded, stored or compared.
+ */
+function sized(fits: (bytes: number) => boolean) {
+  return base64.refine((value) => {
+    const bytes = decodedLength(value.length);
+    return bytes !== undefined && fits(bytes);
+  });
+}
+
+/** A 32-byte key or digest. */
+const key32 = sized((bytes) => bytes === 32);
+
+/** A signature blob: `0x01` and an Ed25519 signature (`PROTOCOL.md` §4). */
+const signature = sized((bytes) => bytes === 65);
+
+/** A vault key sealed to a member (`PROTOCOL.md` §4, §6.3). */
+const envelope = sized((bytes) => bytes === 81);
+
+/** A vault key wrapped by the next one (`PROTOCOL.md` §4, §6.2). */
+const wrappedKey = sized((bytes) => bytes === 73);
+
+/** A private key or recovery key bundle: 41 + 129 + 32 bytes per earlier key (`PROTOCOL.md` §4). */
+const bundle = sized((bytes) => bytes >= 170 && (bytes - 170) % 32 === 0);
+
+/** Section ciphertext: an encrypted blob of whole 256-byte blocks, at most 1 MiB (`PROTOCOL.md` §13). */
+const ciphertext = sized((bytes) => bytes > 41 && (bytes - 41) % 256 === 0 && bytes <= 1_048_576);
+
+/** A 16-byte salt. */
+const salt = sized((bytes) => bytes === 16);
+
 /** A positive integer the API counts with. */
 const positive = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 
@@ -50,21 +87,24 @@ const logEntrySchema = z.object({
   subjectUserId: uuid.optional(),
   role: role.optional(),
   keyVersion: positive,
-  subjectKeys: base64.optional(),
+  subjectKeys: key32.optional(),
   subjectKeyVersion: positive.optional(),
-  keyCommitment: base64.optional(),
-  checkpoint: base64.optional(),
+  keyCommitment: key32.optional(),
+  checkpoint: key32.optional(),
   requestEnd: z.boolean(),
   authorKeyVersion: positive,
   nodeId: uuid.optional(),
   homeVaultId: uuid.optional(),
   nodeKey: z.string().min(1).max(255).optional(),
   sections: z.string().min(1).max(6500).optional(),
-  signature: base64,
+  signature,
   authorUserId: uuid,
-  entryHash: base64,
+  entryHash: key32,
   createdAt: z.string(),
 });
+
+/** Runtime shape of a page of a vault's log. */
+const logPageSchema = z.object({ items: z.array(logEntrySchema), headSeq: positive });
 
 /** A section name. */
 const sectionName = z.string().regex(/^[a-z][a-z0-9_]{0,63}$/);
@@ -82,19 +122,19 @@ const sectionHeaderSchema = z.object({
   dataVersion: positive,
   deleted: z.boolean(),
   logSeq: positive,
-  logHeadHash: base64,
-  previousWriteHash: base64.optional(),
+  logHeadHash: key32,
+  previousWriteHash: key32.optional(),
   writerUserId: uuid,
   writerKeyVersion: positive,
-  ciphertextHash: base64.optional(),
-  signature: base64,
-  writeHash: base64,
+  ciphertextHash: key32.optional(),
+  signature,
+  writeHash: key32,
   changeSeq: positive,
   writtenAt: z.string(),
 });
 
 /** Runtime shape of a stored section write. */
-const sectionWriteSchema = sectionHeaderSchema.extend({ ciphertext: base64.optional() });
+const sectionWriteSchema = sectionHeaderSchema.extend({ ciphertext: ciphertext.optional() });
 
 /** Runtime shape of a section the host removed. */
 const sectionRemovalSchema = z.object({ nodeId: uuid, sectionName, changeSeq: positive });
@@ -115,6 +155,16 @@ const feedRange = {
   lastChangeSeq: z.number().int().nonnegative(),
 };
 
+/** Runtime shape of one page of the latest writes of a node's sections in every vault the caller reads. */
+const nodeSectionsSchema = z.object({
+  nodeId: uuid,
+  sections: z.array(sectionWriteSchema),
+  nextCursor: z.string().max(512).optional(),
+});
+
+/** Runtime shape of the headers a batch write stored. */
+const batchWriteSchema = z.object({ items: z.array(sectionHeaderSchema) });
+
 /** Runtime shape of a page of section headers. */
 const sectionHeaderPageSchema = z.object({ items: z.array(sectionHeaderSchema), ...feedRange });
 
@@ -126,7 +176,7 @@ const leafSchema = z.object({
   nodeId: uuid,
   sectionName,
   dataVersion: positive,
-  writeHash: base64,
+  writeHash: key32,
 });
 
 /** Runtime shape of a page of a checkpoint's leaves. */
@@ -142,15 +192,47 @@ const vaultSchema = z.object({
   id: uuid,
   role,
   keyVersion: positive,
-  keyEnvelope: base64.optional(),
+  keyEnvelope: envelope.optional(),
   envelopeUserKeyVersion: positive.optional(),
   logSeq: positive,
-  logHeadHash: base64,
+  logHeadHash: key32,
   createdByUserId: uuid,
   createdAt: z.string(),
   accepted: z.boolean(),
+  acceptance: z
+    .object({ inviterUserId: uuid.optional(), keyVersion: positive, signature })
+    .optional(),
   addedByUserId: uuid.optional(),
   deleted: z.boolean(),
+});
+
+/** Runtime shape of a batch read of vaults with their next log entries. */
+const vaultBatchSchema = z.object({
+  items: z.array(
+    z.object({
+      vaultId: uuid,
+      found: z.boolean(),
+      vault: vaultSchema.optional(),
+      log: logPageSchema.optional(),
+    }),
+  ),
+});
+
+/** Runtime shape of a page of the user's vaults. */
+const vaultPageSchema = z.object({
+  items: z.array(vaultSchema),
+  nextCursor: z.string().max(512).optional(),
+});
+
+/** Runtime shape of a page of a vault's key versions. */
+const vaultKeysSchema = z.object({
+  items: z.array(
+    z.object({
+      version: positive,
+      previousWrappedKey: wrappedKey.optional(),
+      createdAt: z.string(),
+    }),
+  ),
 });
 
 /** Runtime shape of one key version. */
@@ -158,25 +240,68 @@ const publicKeysSchema = z.object({
   userId: uuid,
   keyVersion: positive,
   cryptoSuite: z.literal(1),
-  encryptionPublicKey: base64,
-  signingPublicKey: base64,
-  recoverySigningPublicKey: base64,
+  encryptionPublicKey: key32,
+  signingPublicKey: key32,
+  recoverySigningPublicKey: key32,
 });
 
 /** Runtime shape of a key statement. */
 const keyStatementSchema = z.object({
   keys: publicKeysSchema,
-  previousKeysDigest: base64.optional(),
-  signature: base64,
-  recoverySignature: base64.optional(),
+  previousKeysDigest: key32.optional(),
+  signature,
+  recoverySignature: signature.optional(),
   createdAt: z.string().optional(),
+});
+
+/** A host user id: 1 to 255 bytes of UTF-8 (`PROTOCOL.md` §5.0). */
+const hostUserId = z
+  .string()
+  .min(1)
+  .refine((value) => {
+    const bytes = new TextEncoder().encode(value).length;
+    return bytes >= 1 && bytes <= 255;
+  });
+
+/** Runtime shape of a batch of people's key statements. */
+const userKeysBatchSchema = z.object({
+  items: z.array(
+    z.object({
+      userId: uuid,
+      hostUserId: hostUserId.optional(),
+      deleted: z.boolean(),
+      versions: z.array(keyStatementSchema),
+    }),
+  ),
+  missingUserIds: z.array(uuid),
+});
+
+/**
+ * Runtime shape of the signed-in user's identity. KDF costs are only typed here: their bounds are
+ * the protocol's, which the client checks before deriving anything (`invalid_kdf`).
+ */
+const identitySchema = z.object({
+  hostUserId,
+  keys: publicKeysSchema,
+  kdf: z.object({
+    algorithm: z.literal('argon2id'),
+    salt,
+    memoryKib: z.number().int().positive(),
+    iterations: z.number().int().positive(),
+    parallelism: z.number().int().positive(),
+  }),
+  privateKeyBundle: bundle,
+  recoveryKeyBundle: bundle,
+  credentialsVersion: positive,
+  createdAt: z.string(),
+  updatedAt: z.string(),
 });
 
 /** Runtime shape of a leaf with its path. */
 const leafProofSchema = z.object({
   index: z.number().int().nonnegative(),
   leaf: leafSchema,
-  path: z.array(base64),
+  path: z.array(key32),
 });
 
 /** Runtime shape of a checkpoint proof. */
@@ -218,6 +343,114 @@ function validated<T>(schema: z.ZodType, value: unknown): T {
  */
 export function validEntry(value: unknown): Schemas['LogEntry'] {
   return validated(logEntrySchema, value);
+}
+
+/** A limit the server states: a positive 32-bit count. */
+const limit = z.number().int().positive().max(2_147_483_647);
+
+/** Runtime shape of the section limits `GET /meta` states; its other fields are not used. */
+const metaSchema = z.object({
+  limits: z.object({
+    maxSectionsPerVault: limit,
+    maxStoredSectionsPerVault: limit,
+    maxPageSize: limit,
+    maxPageBytes: limit,
+  }),
+});
+
+/** The section limits of `GET /meta`. */
+export type MetaLimits = z.output<typeof metaSchema>;
+
+/**
+ * Validates the section limits of `GET /meta`.
+ *
+ * @param value Value from the server.
+ * @returns The limits.
+ * @throws {CloakApiError} `unexpected_response` when they do not fit.
+ */
+export function validMeta(value: unknown): MetaLimits {
+  return validated(metaSchema, value);
+}
+
+/**
+ * Validates a batch read of vaults.
+ *
+ * @param value Value from the server.
+ * @returns The answers.
+ */
+export function validVaultBatch(value: unknown): Schemas['BatchGetVaultsResponse'] {
+  return validated(vaultBatchSchema, value);
+}
+
+/**
+ * Validates one page of the latest writes of a node's sections.
+ *
+ * @param value Value from the server.
+ * @returns The page.
+ */
+export function validNodeSections(value: unknown): Schemas['NodeSections'] {
+  return validated(nodeSectionsSchema, value);
+}
+
+/**
+ * Validates the headers a batch write stored.
+ *
+ * @param value Value from the server.
+ * @returns The headers.
+ */
+export function validBatchWrite(value: unknown): Schemas['BatchWriteResponse'] {
+  return validated(batchWriteSchema, value);
+}
+
+/**
+ * Validates the signed-in user's identity.
+ *
+ * @param value Value from the server.
+ * @returns The identity.
+ */
+export function validIdentity(value: unknown): Schemas['Identity'] {
+  return validated(identitySchema, value);
+}
+
+/**
+ * Validates a page of the user's vaults.
+ *
+ * @param value Value from the server.
+ * @returns The page.
+ */
+export function validVaultPage(value: unknown): Schemas['VaultPage'] {
+  return validated(vaultPageSchema, value);
+}
+
+/**
+ * Validates a page of a vault's key versions.
+ *
+ * @param value Value from the server.
+ * @returns The page.
+ */
+export function validVaultKeys(value: unknown): Schemas['VaultKeyList'] {
+  return validated(vaultKeysSchema, value);
+}
+
+/**
+ * Validates a batch of people's key statements. Each statement is validated again where it is
+ * converted ({@link fromWireStatement}).
+ *
+ * @param value Value from the server.
+ * @returns The batch.
+ */
+export function validUserKeys(value: unknown): Schemas['BatchGetUserKeysResponse'] {
+  return validated(userKeysBatchSchema, value);
+}
+
+/**
+ * Validates a page of a vault's log.
+ *
+ * @param value Value from the server.
+ * @returns The page.
+ */
+export function validLogPage(value: unknown): Schemas['VaultLogPage'] {
+  return validated(logPageSchema, value);
 }
 
 /**
@@ -268,6 +501,42 @@ export function validHeaderPage(value: unknown): Schemas['SectionHeaderPage'] {
  */
 export function validSectionPage(value: unknown): Schemas['SectionPage'] {
   return validated(sectionPageSchema, value);
+}
+
+/**
+ * How many bytes of ciphertext served writes carry, counted from their base64url length without
+ * decoding it; a write without ciphertext, or a header, counts nothing.
+ *
+ * @param writes Writes or headers from one response.
+ * @returns The bytes their ciphertext decodes to.
+ */
+export function ciphertextBytes(writes: readonly object[]): number {
+  return writes.reduce(
+    (sum, write) =>
+      sum +
+      ('ciphertext' in write && typeof write.ciphertext === 'string'
+        ? Math.floor((write.ciphertext.length * 3) / 4)
+        : 0),
+    0,
+  );
+}
+
+/**
+ * Takes in one page of a listing read with cursors, such as the user's vaults. The server picks
+ * the cursors, so it could keep a reader paging forever: a page that promises more must bring
+ * something, and nothing a page brings may have been listed before in the same read.
+ *
+ * @param seen Ids listed so far in this read; the page's are added.
+ * @param ids Ids the page lists.
+ * @param more Whether the page names a next cursor.
+ * @throws {CloakApiError} `unexpected_response` when the page makes no progress.
+ */
+export function takeListed(seen: Set<string>, ids: readonly string[], more: boolean): void {
+  if (more && ids.length === 0) throw new CloakApiError(0, undefined);
+  for (const id of ids) {
+    if (seen.has(id)) throw new CloakApiError(0, undefined);
+    seen.add(id);
+  }
 }
 
 /**

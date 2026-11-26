@@ -107,6 +107,16 @@ internal interface KeyDirectory {
     fun keys(userId: UserId, keyVersion: Int): PublicKeys?
 
     /**
+     * Whether every key version of a range is held with a valid statement, as a chain of key
+     * statements needs (`PROTOCOL.md` §5.2).
+     *
+     * @param userId User.
+     * @param keyVersions The versions, in order.
+     * @return Whether all of them are held.
+     */
+    fun holdsAll(userId: UserId, keyVersions: IntRange): Boolean = keyVersions.all { keys(userId, it) != null }
+
+    /**
      * Whether a later version of the user's keys exists (`PROTOCOL.md` §5.2). The server checks it
      * when an entry is made; a member only for entries verified after learning of the newer one.
      *
@@ -291,9 +301,7 @@ internal object LogRules {
                 // to the new one must be held with a valid statement (§5.2).
                 val start = keys.keys(e.authorUserId, current.userKeyVersion)
                 if (start == null || Messages.keysDigest(start) != current.keysDigest) fail("unverified_keys")
-                for (version in current.userKeyVersion + 1..newVersion) {
-                    if (keys.keys(e.authorUserId, version) == null) fail("unverified_keys")
-                }
+                if (!keys.holdsAll(e.authorUserId, current.userKeyVersion + 1..newVersion)) fail("unverified_keys")
                 val needsCheckpoint = current.role.includes(Role.EDITOR)
                 if (needsCheckpoint && !hasCheckpoint) fail("missing_checkpoint")
                 if (!needsCheckpoint && hasCheckpoint) fail("unexpected_field")

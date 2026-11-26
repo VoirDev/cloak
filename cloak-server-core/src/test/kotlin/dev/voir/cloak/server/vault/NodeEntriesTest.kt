@@ -3,6 +3,7 @@ package dev.voir.cloak.server.vault
 import dev.voir.cloak.server.CloakFixture
 import dev.voir.cloak.server.assertCloakError
 import dev.voir.cloak.server.error.CloakErrorCode
+import dev.voir.cloak.server.identity.domain.UserId
 import dev.voir.cloak.server.meta.Limits
 import dev.voir.cloak.server.protocol.LogRules
 import dev.voir.cloak.server.section.domain.NodeKey
@@ -17,6 +18,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlin.uuid.Uuid
 
 /**
  * Signed node entries (`PROTOCOL.md` §7.7) and the place rule they give writes (§8.4 rule 6): a
@@ -48,6 +50,30 @@ class NodeEntriesTest {
         assertCloakError(CloakErrorCode.ROLE_REQUIRED) { cloak.node(bob, home) }
         val deletion = cloak.entry(alice, home, LogEntryKind.VAULT_DELETED)
         assertCloakError(CloakErrorCode.VALIDATION_FAILED) { cloak.server.vaults.appendNodeEntry(alice.id, home, deletion) }
+    }
+
+    @Test
+    fun `refuses the nil UUID for an id the signed message reads as absent`() {
+        val key = "server-1"
+        val entry = cloak.entry(alice, home, LogEntryKind.NODE_CREATED, nodeId = NodeOrigin(alice.id, home, NodeKey(key)).nodeId, nodeKey = key)
+        val nil = mapOf(
+            "subjectUserId" to entry.copy(subjectUserId = UserId(Uuid.NIL)),
+            "homeVaultId" to entry.copy(homeVaultId = VaultId(Uuid.NIL)),
+        )
+        for ((field, input) in nil) {
+            val error = assertCloakError(CloakErrorCode.VALIDATION_FAILED) { cloak.server.vaults.appendNodeEntry(alice.id, home, input) }
+            assertEquals(listOf("absent"), error.fieldErrors.filter { it.pointer.endsWith("/$field") }.map { it.code }, field)
+        }
+        cloak.server.vaults.appendNodeEntry(alice.id, home, entry)
+    }
+
+    @Test
+    fun `refuses a node key with a lone surrogate, which has no signed message`() {
+        val entry = cloak.entry(alice, home, LogEntryKind.NODE_CREATED, nodeId = NodeOrigin(alice.id, home, NodeKey("x")).nodeId, nodeKey = "x")
+        val error = assertCloakError(CloakErrorCode.VALIDATION_FAILED) {
+            cloak.server.vaults.appendNodeEntry(alice.id, home, entry.copy(nodeKey = "x\uD800"))
+        }
+        assertEquals(listOf("format"), error.fieldErrors.filter { it.pointer.endsWith("/nodeKey") }.map { it.code })
     }
 
     @Test

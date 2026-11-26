@@ -23,4 +23,14 @@ describe('user ids', () => {
     expect(() => cloakUserId('é'.repeat(128))).toThrow();
     expect(cloakUserId('é'.repeat(127))).toMatch(/^[0-9a-f-]{36}$/);
   });
+
+  it('refuses a host id with a lone surrogate rather than derive the id of U+FFFD', () => {
+    expect(() => cloakUserId('x\uD800')).toThrow(
+      expect.objectContaining({ code: 'invalid_format' }),
+    );
+    expect(() => cloakUserId('\uDC00')).toThrow(
+      expect.objectContaining({ code: 'invalid_format' }),
+    );
+    expect(cloakUserId('x\uFFFD')).toMatch(/^[0-9a-f-]{36}$/);
+  });
 });

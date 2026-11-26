@@ -19,9 +19,10 @@ import dev.voir.cloak.api.models.LogEntryKind as ApiLogEntryKind
 import dev.voir.cloak.api.models.Role as ApiRole
 
 /**
- * Conversions between generated wire models and core values. Jackson already checked JSON
- * types, UUIDs and instants; what is left are strings whose format the core needs, and every
- * parse names the JSON Pointer of its value.
+ * Conversions between generated wire models and core values. CloakJsonConverter's mapper already
+ * checked JSON types, refusing every coercion between them, UUIDs in any but their canonical form
+ * and instants; what is left are strings whose format the core needs, and every parse names the
+ * JSON Pointer of its value.
  */
 internal object Wire {
     /** Base64url without padding, as the API requires. */
@@ -83,14 +84,24 @@ internal object Wire {
     }
 
     /**
-     * Parses a UUID from a path or query string.
+     * Parses a UUID in its canonical form only, lowercase and hyphenated as the contract writes it
+     * (`0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e`): no uppercase, no other grouping, no braces.
+     *
+     * @param value Wire value.
+     * @return The UUID, or `null` for any other spelling.
+     */
+    fun canonicalUuid(value: String): Uuid? = Uuid.parseOrNull(value)?.takeIf { it.toString() == value }
+
+    /**
+     * Parses a UUID from a query string, in its canonical form only (see [canonicalUuid]).
      *
      * @param value Wire value.
      * @param pointer JSON Pointer of the value.
      * @return The UUID.
+     * @throws CloakException `validation_failed`, rule `format`, for any other spelling.
      */
     fun uuid(value: String, pointer: String): Uuid =
-        runCatching { Uuid.parse(value) }.getOrElse { throw invalid(pointer, "format", "Must be a UUID.") }
+        canonicalUuid(value) ?: throw invalid(pointer, "format", "Must be a lowercase hyphenated UUID.")
 
     /** Converts a generated role; the enums share their wire values. */
     fun role(value: ApiRole): Role = Role.fromCode(value.value)

@@ -11,7 +11,7 @@ import kotlinx.io.bytestring.ByteString
  * mis-sized values from being stored.
  */
 internal object BlobRules {
-    /** The only blob format version today. */
+    /** Blob format version 1, the one this protocol version defines (`PROTOCOL.md` §4). */
     const val FORMAT_1: Int = 1
 
     /** Format versions accepted on write. */

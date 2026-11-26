@@ -3,7 +3,10 @@ import {
   createIdentity,
   fingerprint,
   openRecoveryKeyBundle,
+  publicKeysOf,
+  randomBytes,
   replaceIdentityKeys,
+  signKeyStatement,
   toBase64Url,
   type KeyStatement,
   type NewKeyVersion,
@@ -39,12 +42,12 @@ function wire(statement: KeyStatement) {
 }
 
 /**
- * A keyring for Alice over a server that serves [served] for Bob, named [bobHostId] (`null` sends
- * no name) and marked deleted when [bobDeleted].
+ * A keyring for Alice over a server that serves [served] for Bob (`undefined` leaves him out),
+ * named [bobHostId] (`null` sends no name) and marked deleted when [bobDeleted].
  */
 function keyringServing(
   alice: NewKeyVersion,
-  served: () => readonly KeyStatement[],
+  served: () => readonly KeyStatement[] | undefined,
   storage = createMemoryStorage(),
   bobHostId: string | null = 'bob@example.com',
   bobDeleted = false,
@@ -53,17 +56,22 @@ function keyringServing(
     baseUrl: 'http://cloak.test/cloak/v1',
     fetch: (input, init) => {
       const request = new Request(input, init);
+      const bob = served();
       const bodyJson = {
         items: [
-          {
-            userId: BOB,
-            ...(bobHostId === null ? {} : { hostUserId: bobHostId }),
-            deleted: bobDeleted,
-            versions: served().map(wire),
-          },
+          ...(bob === undefined
+            ? []
+            : [
+                {
+                  userId: BOB,
+                  ...(bobHostId === null ? {} : { hostUserId: bobHostId }),
+                  deleted: bobDeleted,
+                  versions: bob.map(wire),
+                },
+              ]),
           { userId: ALICE, hostUserId: 'alice', deleted: false, versions: [wire(alice.statement)] },
         ],
-        missingUserIds: [],
+        missingUserIds: bob === undefined ? [BOB] : [],
       };
       expect(new URL(request.url).pathname).toBe('/cloak/v1/users/keys/batch-get');
       return Promise.resolve(
@@ -96,8 +104,11 @@ describe('the keyring', () => {
     const { keyring, local } = keyringServing(alice, () => [bob.statement, bobV2.statement]);
 
     await keyring.load([BOB]);
+    expect(await local.pin(BOB)).toBeUndefined();
+    await keyring.pin([BOB]);
 
     expect((await local.pin(BOB))?.keyVersion).toBe(1);
+    expect((await local.newest(BOB))?.keyVersion).toBe(2);
     expect(keyring.newest(BOB)).toEqual(bobV2.keys);
     expect(keyring.isSuperseded(BOB, 1)).toBe(true);
     expect(keyring.isSuperseded(BOB, 2)).toBe(false);
@@ -168,6 +179,7 @@ describe('the keyring', () => {
     let served: readonly KeyStatement[] = [bob.statement];
     const first = keyringServing(alice, () => served, storage);
     await first.keyring.load([BOB]);
+    await first.keyring.pin([BOB]);
 
     const impostor = await createIdentity(BOB, 'server password');
     served = [impostor.statement];
@@ -200,6 +212,7 @@ describe('the keyring', () => {
     const storage = createMemoryStorage();
     const first = keyringServing(alice, () => [bob.statement], storage);
     await first.keyring.load([BOB]);
+    await first.keyring.pin([BOB]);
 
     const impostor = await createIdentity(BOB, 'server password');
     const second = keyringServing(alice, () => [bob.statement], storage);
@@ -208,12 +221,64 @@ describe('the keyring', () => {
     );
   });
 
+  it('keeps no pin for a person it only loaded, so other keys load later', async () => {
+    const storage = createMemoryStorage();
+    const first = keyringServing(alice, () => [bob.statement], storage);
+    await first.keyring.load([BOB]);
+
+    const impostor = await createIdentity(BOB, 'server password');
+    const second = keyringServing(alice, () => [impostor.statement], storage);
+    await second.keyring.load([BOB]);
+    expect(second.keyring.newest(BOB)).toEqual(impostor.keys);
+    expect(await second.local.pin(BOB)).toBeUndefined();
+  });
+
   it('raises a key alarm when the server later hides newer statements', async () => {
     const storage = createMemoryStorage();
     const first = keyringServing(alice, () => [bob.statement, bobV2.statement], storage);
     await first.keyring.load([BOB]);
+    await first.keyring.pin([BOB]);
 
     const second = keyringServing(alice, () => [bob.statement], storage);
     await expect(second.keyring.load([BOB])).rejects.toBeInstanceOf(CloakKeyChangedError);
+  });
+
+  it('raises a key alarm when the server leaves a pinned person out of a batch', async () => {
+    const storage = createMemoryStorage();
+    let served: readonly KeyStatement[] | undefined = [bob.statement];
+    const first = keyringServing(alice, () => served, storage);
+    await first.keyring.load([BOB]);
+    await first.keyring.pin([BOB]);
+
+    served = undefined;
+    const second = keyringServing(alice, () => served, storage);
+    await expect(second.keyring.load([BOB])).rejects.toBeInstanceOf(CloakKeyChangedError);
+    // Someone this device never pinned is only a person without an identity.
+    const fresh = keyringServing(alice, () => undefined);
+    await fresh.keyring.load([BOB]);
+    expect(fresh.keyring.newest(BOB)).toBeUndefined();
+  });
+
+  it('reads O as 0 and I or L as 1 in a confirmed fingerprint', async () => {
+    // Keys whose fingerprint holds both digits a reader may type as letters.
+    let statement: KeyStatement;
+    do {
+      const signingSeed = randomBytes(32);
+      const keys = publicKeysOf(
+        BOB,
+        1,
+        { encryptionPrivateKey: randomBytes(32), signingSeed },
+        randomBytes(32),
+      );
+      statement = signKeyStatement(keys, signingSeed);
+    } while (!/0.*1|1.*0/.test(fingerprint(statement.keys)));
+    const { keyring, local } = keyringServing(alice, () => [statement]);
+    let ones = 0;
+    const typed = fingerprint(statement.keys)
+      .replace(/0/g, 'o')
+      .replace(/1/g, () => ((ones += 1) % 2 === 0 ? 'I' : 'l'));
+
+    await keyring.confirm(BOB, typed);
+    expect((await local.pin(BOB))?.vouched).toBe(true);
   });
 });

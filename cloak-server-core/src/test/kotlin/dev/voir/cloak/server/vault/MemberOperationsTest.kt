@@ -1,6 +1,8 @@
 package dev.voir.cloak.server.vault
 
 import dev.voir.cloak.server.CloakFixture
+import dev.voir.cloak.server.CloakServer
+import dev.voir.cloak.server.CloakSettings
 import dev.voir.cloak.server.assertCloakError
 import dev.voir.cloak.server.error.CloakErrorCode
 import dev.voir.cloak.server.section.domain.NodeId
@@ -10,9 +12,16 @@ import dev.voir.cloak.server.vault.domain.AddMemberCommand
 import dev.voir.cloak.server.vault.domain.DeliverEnvelopeCommand
 import dev.voir.cloak.server.vault.domain.LeftOutWrite
 import dev.voir.cloak.server.vault.domain.LogEntryKind
+import dev.voir.cloak.server.vault.domain.RecordKeyReplacementCommand
 import dev.voir.cloak.server.vault.domain.Role
 import dev.voir.cloak.server.vault.domain.SetMemberRoleCommand
 import kotlinx.io.bytestring.ByteString
+import java.lang.reflect.InvocationTargetException
+import java.lang.reflect.Method
+import java.lang.reflect.Proxy
+import java.sql.Connection
+import java.util.concurrent.atomic.AtomicInteger
+import javax.sql.DataSource
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -172,6 +181,43 @@ class MemberOperationsTest {
         assertEquals(2, cloak.vault(bob, vault).envelopeUserKeyVersion)
         cloak.write(bob, vault, cloak.node(alice, vault), "general")
     }
+
+    @Test
+    fun `recording a replacement over many key versions checks their chain in one query`() {
+        repeat(20) { cloak.replaceKeys(alice) }
+        val log = cloak.entry(alice, vault, LogEntryKind.MEMBER_KEYS_REPLACED, subject = alice, checkpoint = cloak.checkpoint(alice, vault))
+        val keyReads = AtomicInteger()
+        val counted = CloakServer(countingKeyReads(cloak.dataSource, keyReads), cloak.clock, CloakSettings.defaults())
+
+        counted.members.recordKeyReplacement(alice.id, vault, RecordKeyReplacementCommand(log, TestBlobs.envelope(), emptyList()))
+
+        assertEquals(21, cloak.vault(alice, vault).envelopeUserKeyVersion)
+        // The committed version the chain starts from, the range up to the new one, and the new keys.
+        assertEquals(3, keyReads.get())
+    }
+
+    /** [dataSource], counting in [reads] every statement prepared to read `cloak.identity_keys`. */
+    private fun countingKeyReads(dataSource: DataSource, reads: AtomicInteger): DataSource =
+        Proxy.newProxyInstance(DataSource::class.java.classLoader, arrayOf(DataSource::class.java)) { _, method, args ->
+            when (val result = forward(dataSource, method, args)) {
+                is Connection -> Proxy.newProxyInstance(Connection::class.java.classLoader, arrayOf(Connection::class.java)) { _, call, callArgs ->
+                    val sql = callArgs?.firstOrNull() as? String
+                    if (call.name == "prepareStatement" && sql != null && sql.startsWith("SELECT") && "cloak.identity_keys" in sql) {
+                        reads.incrementAndGet()
+                    }
+                    forward(result, call, callArgs)
+                }
+                else -> result
+            }
+        } as DataSource
+
+    /** Calls [method] on [target], throwing what it throws rather than its reflective wrapper. */
+    private fun forward(target: Any, method: Method, args: Array<out Any?>?): Any? =
+        try {
+            method.invoke(target, *(args ?: emptyArray()))
+        } catch (failure: InvocationTargetException) {
+            throw failure.targetException
+        }
 
     @Test
     fun `a member delivers their own envelope, only an admin delivers another member's`() {

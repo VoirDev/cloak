@@ -29,10 +29,12 @@ internal class Canonical {
     /**
      * Appends a string as a 2-byte big-endian length and its UTF-8 bytes, without normalizing it.
      *
-     * @param value String of at most 65 535 UTF-8 bytes.
+     * @param value Well-formed string of at most 65 535 UTF-8 bytes.
      * @return This builder.
+     * @throws IllegalArgumentException when the string has a lone surrogate or is too long.
      */
     fun str(value: String): Canonical {
+        require(isWellFormed(value)) { "Canonical strings are well-formed Unicode" }
         val bytes = value.encodeToByteArray()
         require(bytes.size <= 0xFFFF) { "String too long" }
         out.write(bytes.size ushr 8)
@@ -128,6 +130,33 @@ internal class Canonical {
      * @return Canonical bytes appended so far.
      */
     fun build(): ByteString = ByteString(out.toByteArray())
+
+    /** Well-formedness of strings, shared with request checks. */
+    companion object {
+        /**
+         * Tells whether a string is well-formed UTF-16, with every surrogate in a pair
+         * (`PROTOCOL.md` §3). UTF-8 has no encoding for a lone surrogate, and `encodeToByteArray`
+         * would write U+FFFD for it, so two different strings would encode the same.
+         *
+         * @param value String to test.
+         * @return Whether it has no lone surrogate.
+         */
+        fun isWellFormed(value: String): Boolean {
+            var index = 0
+            while (index < value.length) {
+                val char = value[index]
+                when {
+                    char.isHighSurrogate() -> {
+                        if (index + 1 >= value.length || !value[index + 1].isLowSurrogate()) return false
+                        index += 2
+                    }
+                    char.isLowSurrogate() -> return false
+                    else -> index += 1
+                }
+            }
+            return true
+        }
+    }
 
     /** Appends a 32-byte value or its absence. */
     private fun bytes32(value: ByteString?): Canonical {

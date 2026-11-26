@@ -23,7 +23,7 @@ internal object IdentityKeysTable : Table("cloak.identity_keys") {
     /** Key version, from 1; `ck_identity_keys__chain` enforces it. */
     val keyVersion = integer("key_version")
 
-    /** Algorithm suite of the keys; only `1` exists today. */
+    /** Crypto suite of the keys; protocol version 1 defines suite `1` (`PROTOCOL.md` §2). */
     val cryptoSuite = short("crypto_suite").check("ck_identity_keys__crypto_suite") { it eq 1.toShort() }
 
     /** Raw 32-byte X25519 public key that vault keys are sealed to. */

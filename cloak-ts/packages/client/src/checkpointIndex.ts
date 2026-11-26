@@ -3,12 +3,14 @@ import {
   compareSections,
   equalBytes,
   resolveCheckpointProof,
+  toBase64Url,
   type CheckpointLeaf,
   type CheckpointRecord,
 } from '@voirdev/cloak-crypto';
 
 import { CloakVaultLogError } from './CloakVaultLogError.ts';
 import { body, type CloakApi } from './api.ts';
+import type { SectionLimits } from './limits.ts';
 import { fromWireLeaf, fromWireLeafProof, validLeafPage, validProofs } from './wire.ts';
 
 /** One question to a checkpoint: what it holds for a section. */
@@ -26,6 +28,9 @@ export type CheckpointAnswers = ReadonlyMap<string, CheckpointLeaf | undefined>;
 
 /** Most proofs one request asks for: the API's batch size. */
 const PROOF_BATCH = 100;
+
+/** Most checkpoint sizes kept in memory; the oldest are dropped first. */
+const MAX_KEPT_SIZES = 100_000;
 
 /** Leaves per page of a checkpoint's leaf list: the API's index page size. */
 const LEAF_PAGE = 1000;
@@ -57,30 +62,62 @@ export function queryKey(seq: number, nodeId: string, sectionName: string): stri
 /**
  * What the checkpoints of the vaults a session reads hold (`PROTOCOL.md` §7.5). Every answer is
  * verified against the signed root before use: a proof's path, or a whole leaf list whose root is
- * recomputed. A checkpoint never changes, so verified answers are kept for the session. A server
- * whose answer does not verify is lying about a signed checkpoint, which fails the read rather
- * than refusing the write it concerns.
+ * recomputed. A checkpoint never changes, so verified answers are kept for the session, by the
+ * checkpoint's vault, entry and signed root: a vault forgotten and verified again on another
+ * history can carry another checkpoint at the same entry. A server whose answer does not verify is
+ * lying about a signed checkpoint, which fails the read rather than refusing the write it
+ * concerns.
  */
 export class CheckpointIndex {
   /** HTTP client. */
   readonly #api: CloakApi;
-  /** Verified whole leaf lists, by vault and checkpoint, then section. */
+  /** Verified whole leaf lists, by {@link checkpointKey}, then section. */
   readonly #lists = new Map<string, ReadonlyMap<string, CheckpointLeaf>>();
   /** Leaves held by {@link #lists}. */
   #keptLeaves = 0;
-  /** Verified single answers, by vault and {@link queryKey}. */
+  /** Verified single answers, by {@link checkpointKey} and section. */
   readonly #answers = new Map<string, CheckpointLeaf | undefined>();
+  /**
+   * Checkpoint sizes learned from verified answers, by {@link checkpointKey}. The log signs only a
+   * checkpoint's root, so a size is known once a proof or the whole leaf list of the checkpoint
+   * verified; it only plans proof batches.
+   */
+  readonly #sizes = new Map<string, number>();
+  /** The server's section limits, which bound a checkpoint's leaf list and a proof batch. */
+  readonly #limits: () => Promise<SectionLimits>;
 
   /**
    * @param api HTTP client.
+   * @param limits The server's section limits.
    */
-  constructor(api: CloakApi) {
+  constructor(api: CloakApi, limits: () => Promise<SectionLimits>) {
     this.#api = api;
+    this.#limits = limits;
+  }
+
+  /**
+   * Drops every answer kept about a vault's checkpoints, for a vault the session forgets.
+   *
+   * @param vaultId The vault.
+   */
+  forget(vaultId: string): void {
+    const prefix = `${vaultId}/`;
+    for (const [key, list] of this.#lists) {
+      if (!key.startsWith(prefix)) continue;
+      this.#lists.delete(key);
+      this.#keptLeaves -= list.size;
+    }
+    for (const key of [...this.#answers.keys()])
+      if (key.startsWith(prefix)) this.#answers.delete(key);
+    for (const key of [...this.#sizes.keys()]) if (key.startsWith(prefix)) this.#sizes.delete(key);
   }
 
   /**
    * Answers what checkpoints of one vault hold for some sections, with as few requests as it
-   * can: a whole leaf list for a checkpoint asked about often, batched proofs for the rest.
+   * can: a whole leaf list for a checkpoint asked about often, batched proofs for the rest. The
+   * checkpoints of one proof batch hold at most `maxSectionsPerVault` leaves together, as the
+   * server requires: a checkpoint whose size this session has not learned yet counts as that
+   * many, so it goes alone, and its answer teaches its size for later batches.
    *
    * @param vaultId The vault.
    * @param queries Questions, each about a checkpoint of the vault's verified log.
@@ -117,11 +154,54 @@ export class CheckpointIndex {
         );
       }
     }
-    for (let start = 0; start < proofQueries.length; start += PROOF_BATCH) {
-      const batch = proofQueries.slice(start, start + PROOF_BATCH);
+    const { live } = await this.#limits();
+    for (let start = 0; start < proofQueries.length;) {
+      const batch = this.#nextBatch(vaultId, proofQueries.slice(start), live);
       for (const [key, leaf] of await this.#prove(vaultId, batch)) answers.set(key, leaf);
+      start += batch.length;
     }
     return answers;
+  }
+
+  /**
+   * The longest start of [pending] one proof request may ask: at most {@link PROOF_BATCH}
+   * queries, whose checkpoints hold at most [live] leaves together by their known sizes, and at
+   * least one query.
+   */
+  #nextBatch(
+    vaultId: string,
+    pending: readonly CheckpointQuery[],
+    live: number,
+  ): readonly CheckpointQuery[] {
+    const counted = new Set<number>();
+    let leaves = 0;
+    let end = 0;
+    for (const query of pending) {
+      if (end === PROOF_BATCH) break;
+      if (!counted.has(query.checkpoint.seq)) {
+        const size = Math.min(
+          this.#sizes.get(checkpointKey(vaultId, query.checkpoint)) ?? live,
+          live,
+        );
+        if (end > 0 && leaves + size > live) break;
+        counted.add(query.checkpoint.seq);
+        leaves += size;
+      }
+      end += 1;
+    }
+    return pending.slice(0, end);
+  }
+
+  /** Keeps a checkpoint's size learned from a verified answer. */
+  #learnSize(vaultId: string, checkpoint: CheckpointRecord, size: number): void {
+    const key = checkpointKey(vaultId, checkpoint);
+    this.#sizes.delete(key);
+    this.#sizes.set(key, size);
+    while (this.#sizes.size > MAX_KEPT_SIZES) {
+      const [oldest] = this.#sizes.keys();
+      if (oldest === undefined) break;
+      this.#sizes.delete(oldest);
+    }
   }
 
   /** What is already known about a query. */
@@ -129,10 +209,11 @@ export class CheckpointIndex {
     vaultId: string,
     query: CheckpointQuery,
   ): { readonly found: boolean; readonly leaf?: CheckpointLeaf | undefined } {
-    const list = this.#lists.get(listKey(vaultId, query.checkpoint.seq));
+    const checkpoint = checkpointKey(vaultId, query.checkpoint);
+    const list = this.#lists.get(checkpoint);
     if (list !== undefined)
       return { found: true, leaf: list.get(sectionKey(query.nodeId, query.sectionName)) };
-    const key = `${vaultId}/${queryKey(query.checkpoint.seq, query.nodeId, query.sectionName)}`;
+    const key = `${checkpoint}/${sectionKey(query.nodeId, query.sectionName)}`;
     return this.#answers.has(key)
       ? { found: true, leaf: this.#answers.get(key) }
       : { found: false };
@@ -143,9 +224,10 @@ export class CheckpointIndex {
     vaultId: string,
     checkpoint: CheckpointRecord,
   ): Promise<ReadonlyMap<string, CheckpointLeaf>> {
-    const kept = this.#lists.get(listKey(vaultId, checkpoint.seq));
+    const kept = this.#lists.get(checkpointKey(vaultId, checkpoint));
     if (kept !== undefined) return kept;
     const mismatch = (): CloakVaultLogError => new CloakVaultLogError(vaultId, 'state_mismatch');
+    const { live } = await this.#limits();
     const leaves: CheckpointLeaf[] = [];
     let size: number | undefined;
     let cursor: string | undefined;
@@ -161,9 +243,11 @@ export class CheckpointIndex {
         ),
       );
       // A page that brings nothing but promises more would never end; one that brings more
-      // leaves than the checkpoint has is lying. Order and the root are checked below.
+      // leaves than the checkpoint has is lying, and so is a checkpoint with more leaves than a
+      // vault has live sections. Order and the root are checked below.
       if (
         page.checkpointSeq !== checkpoint.seq ||
+        page.size > live ||
         (size !== undefined && page.size !== size) ||
         leaves.length + page.leaves.length > page.size ||
         (page.nextCursor !== undefined && page.leaves.length === 0)
@@ -185,7 +269,8 @@ export class CheckpointIndex {
     if (!equalBytes(checkpointRoot(leaves), checkpoint.root)) throw mismatch();
 
     const list = new Map(leaves.map((leaf) => [sectionKey(leaf.nodeId, leaf.sectionName), leaf]));
-    this.#lists.set(listKey(vaultId, checkpoint.seq), list);
+    this.#lists.set(checkpointKey(vaultId, checkpoint), list);
+    this.#learnSize(vaultId, checkpoint, leaves.length);
     this.#keptLeaves += list.size;
     while (this.#keptLeaves > MAX_KEPT_LEAVES && this.#lists.size > 1) {
       const [oldest] = this.#lists;
@@ -218,10 +303,17 @@ export class CheckpointIndex {
     if (response.items.length !== batch.length)
       throw new CloakVaultLogError(vaultId, 'state_mismatch');
     const answers = new Map<string, CheckpointLeaf | undefined>();
+    // A checkpoint has one size: every proof against it states the same, and the one learned.
+    const sizes = new Map<number, number>();
     batch.forEach((query, index) => {
       const proof = response.items[index];
-      if (proof?.checkpointSeq !== query.checkpoint.seq)
+      const size =
+        sizes.get(query.checkpoint.seq) ??
+        this.#sizes.get(checkpointKey(vaultId, query.checkpoint)) ??
+        proof?.size;
+      if (proof?.checkpointSeq !== query.checkpoint.seq || proof.size !== size)
         throw new CloakVaultLogError(vaultId, 'state_mismatch');
+      sizes.set(query.checkpoint.seq, proof.size);
       const leafProof = (wire: typeof proof.inclusion) =>
         wire === undefined ? undefined : fromWireLeafProof(wire, proof.size);
       const lookup = resolveCheckpointProof(
@@ -237,7 +329,11 @@ export class CheckpointIndex {
       if (!lookup.verified) throw new CloakVaultLogError(vaultId, 'state_mismatch');
       const key = queryKey(query.checkpoint.seq, query.nodeId, query.sectionName);
       answers.set(key, lookup.leaf);
-      this.#answers.set(`${vaultId}/${key}`, lookup.leaf);
+      this.#learnSize(vaultId, query.checkpoint, proof.size);
+      this.#answers.set(
+        `${checkpointKey(vaultId, query.checkpoint)}/${sectionKey(query.nodeId, query.sectionName)}`,
+        lookup.leaf,
+      );
     });
     while (this.#answers.size > MAX_KEPT_ANSWERS) {
       const [oldest] = this.#answers.keys();
@@ -248,9 +344,9 @@ export class CheckpointIndex {
   }
 }
 
-/** Key of a vault's checkpoint. */
-function listKey(vaultId: string, seq: number): string {
-  return `${vaultId}/${String(seq)}`;
+/** Key of a vault's checkpoint: its vault, its entry and the root it signs. */
+function checkpointKey(vaultId: string, checkpoint: CheckpointRecord): string {
+  return `${vaultId}/${String(checkpoint.seq)}/${toBase64Url(checkpoint.root)}`;
 }
 
 /** Key of a section within one vault's checkpoint. */

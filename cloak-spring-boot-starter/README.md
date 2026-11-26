@@ -4,8 +4,8 @@ Serves the Cloak API (`cloak-protocol/openapi/cloak-api.v1.yaml`) under `/cloak/
 Boot 4 servlet application. All rules live in `cloak-server-core`; this module maps HTTP to it,
 renders failures as RFC 9457 problems, and reports metrics and health.
 
-The host provides a PostgreSQL `DataSource` and a `CloakPrincipalResolver` that names the caller by
-the host's own user id:
+The host provides a PostgreSQL `DataSource` with its JDBC driver, which Cloak does not bring, and a
+`CloakPrincipalResolver` that names the caller by the host's own user id:
 
 ```kotlin
 @Bean

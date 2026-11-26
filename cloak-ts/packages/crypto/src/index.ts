@@ -76,6 +76,7 @@ export {
   sealLocalRecord,
 } from './localState.ts';
 export {
+  addedBy,
   logHead,
   membershipAt,
   replayVaultLog,
@@ -132,14 +133,17 @@ export {
   type WriteCheckpoints,
   type WriteRefusal,
 } from './sections.ts';
+export { checkEncryptionKey } from './hpke.ts';
 export {
   SMALL_ORDER_POINTS,
   checkSignature,
+  checkSigningKey,
   isSmallOrderKey,
   requireValidSignature,
   sign,
   signingPublicKey,
   verify,
+  type KeyRefusal,
   type SignatureRefusal,
 } from './signatures.ts';
 export {
@@ -180,6 +184,7 @@ export {
   type NodeOrigin,
   type SectionScope,
 } from './nodes.ts';
+export { inviterAcceptanceMessage, vaultAcceptanceMessage } from './acceptances.ts';
 export {
   credentialsMessage,
   identityDeletionMessage,

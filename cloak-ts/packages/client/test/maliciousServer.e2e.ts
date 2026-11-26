@@ -1,16 +1,23 @@
 import {
   cloakUserId,
   createIdentity,
+  deriveMasterKey,
   entryHash,
   fromBase64Url,
+  fromSecretKeyCode,
   generateVaultKey,
   headerWriteHash,
   keysDigest,
+  openPrivateKeyBundle,
+  randomBytes,
   sealEnvelope,
   sectionCiphertextHash,
   signLogEntry,
+  signSectionWrite,
   toBase64Url,
+  type IdentitySecrets,
   type LogEntryFields,
+  type SectionWriteFields,
 } from '@voirdev/cloak-crypto';
 import { describe, expect, inject, it } from 'vitest';
 
@@ -19,6 +26,7 @@ import {
   CloakKeyChangedError,
   createCloakClient,
   createMemoryStorage,
+  isCloakApiError,
   nodeIdFor,
   type CloakClient,
   type CloakSession,
@@ -26,7 +34,8 @@ import {
   type DecryptedSection,
 } from '../src/index.ts';
 import type { Schemas } from '../src/api.ts';
-import { fromWireHeader } from '../src/wire.ts';
+import { fromWireHeader, toWireWrite } from '../src/wire.ts';
+import { register, replaceKeys } from './credentials.ts';
 
 /**
  * A server that lies: before a request reaches the real server, [intercept] may answer it
@@ -85,7 +94,7 @@ async function victim(): Promise<Victim> {
     client,
     hostile,
     storage,
-    ...(await client.register({ userId, password: 'password' })),
+    ...(await register(client, { userId, password: 'password' })),
   };
 }
 
@@ -168,7 +177,8 @@ function served(captured: CapturedWrite, writerUserId: string): Schemas['Section
     nodeId: captured.nodeId,
     sectionName: captured.sectionName,
     writerUserId,
-    writeHash: '',
+    // A placeholder of the right size; the hash is computed from the header below.
+    writeHash: toBase64Url(new Uint8Array(32)),
     changeSeq: 999,
     writtenAt: new Date().toISOString(),
   };
@@ -234,9 +244,104 @@ async function storedWrite(
   return (await response.json()) as Schemas['SectionWrite'];
 }
 
+/** Reads a vault's view as [userId] sees it, past any hostile server. */
+async function viewOf(userId: string, vaultId: string): Promise<Schemas['Vault']> {
+  const response = await fetch(`${inject('cloakBaseUrl')}/vaults/${vaultId}`, {
+    headers: { [USER_HEADER]: userId },
+  });
+  return (await response.json()) as Schemas['Vault'];
+}
+
+/** Opens [user]'s current private keys with the password and secret key, as a thief of both could. */
+async function openSecrets(user: Victim): Promise<IdentitySecrets> {
+  const response = await fetch(`${inject('cloakBaseUrl')}/identity`, {
+    headers: { [USER_HEADER]: user.userId },
+  });
+  const identity = (await response.json()) as Schemas['Identity'];
+  const masterKey = await deriveMasterKey({
+    password: 'password',
+    secretKey: fromSecretKeyCode(user.secretKeyCode),
+    userId: user.cloakId,
+    kdf: { ...identity.kdf, salt: fromBase64Url(identity.kdf.salt) },
+  });
+  return openPrivateKeyBundle(masterKey, identity.keys, fromBase64Url(identity.privateKeyBundle));
+}
+
+/**
+ * A write of [writer]'s, signed with the secrets of their key version 1, after [previous] and
+ * citing the head of [view], as the server would serve it; its ciphertext is noise of a valid
+ * size, since nobody reads it.
+ */
+function signedByHand(
+  secrets: IdentitySecrets,
+  writer: Victim,
+  previous: Schemas['SectionWrite'],
+  view: Schemas['Vault'],
+): Schemas['SectionWrite'] {
+  const fields: SectionWriteFields = {
+    vaultId: previous.vaultId,
+    nodeId: previous.nodeId,
+    sectionName: previous.sectionName,
+    vaultKeyVersion: view.keyVersion,
+    nodeType: previous.nodeType,
+    homeVaultId: previous.homeVaultId,
+    ownerUserId: previous.ownerUserId,
+    nodeKey: previous.nodeKey,
+    dataVersion: previous.dataVersion + 1,
+    deleted: false,
+    logSeq: view.logSeq,
+    logHeadHash: fromBase64Url(view.logHeadHash),
+    previousWriteHash: fromBase64Url(previous.writeHash),
+    writerUserId: writer.cloakId,
+    writerKeyVersion: 1,
+    ciphertext: randomBytes(41 + 256),
+  };
+  const input = toWireWrite(fields, signSectionWrite(fields, secrets.signingSeed));
+  const { vaultId, nodeId, sectionName } = fields;
+  return served({ vaultId, nodeId, sectionName, input }, writer.cloakId);
+}
+
 /** The reason a section was refused. */
 function refusal(section: DecryptedSection): string {
   return section.status === 'refused' ? section.reason : section.status;
+}
+
+/** A keys batch in which [impostor]'s first version stands for [person]'s keys. */
+function withImpostor(
+  batch: Schemas['BatchGetUserKeysResponse'],
+  person: Victim,
+  impostor: Awaited<ReturnType<typeof createIdentity>>,
+): Schemas['BatchGetUserKeysResponse'] {
+  return {
+    ...batch,
+    items: batch.items.map((item) =>
+      item.userId !== person.cloakId
+        ? item
+        : {
+            userId: person.cloakId,
+            hostUserId: person.userId,
+            deleted: false,
+            versions: [
+              {
+                keys: {
+                  userId: person.cloakId,
+                  keyVersion: 1,
+                  cryptoSuite: 1,
+                  encryptionPublicKey: toBase64Url(impostor.keys.encryptionPublicKey),
+                  signingPublicKey: toBase64Url(impostor.keys.signingPublicKey),
+                  recoverySigningPublicKey: toBase64Url(impostor.keys.recoverySigningPublicKey),
+                },
+                signature: toBase64Url(impostor.statement.signature),
+              },
+            ],
+          },
+    ),
+  };
+}
+
+/** Whether [request] asks for people's keys. */
+function asksForKeys(request: Request): boolean {
+  return request.method === 'POST' && pathOf(request) === '/users/keys/batch-get';
 }
 
 describe('a malicious server', () => {
@@ -338,35 +443,16 @@ describe('a malicious server', () => {
     await meet(alice, carol);
     const impostor = await createIdentity(carol.cloakId, 'impostor');
 
-    alice.hostile.rewrite = async (request, response) => {
-      if (request.method !== 'POST' || pathOf(request) !== '/users/keys/batch-get')
-        return undefined;
-      const batch = (await response.json()) as Schemas['BatchGetUserKeysResponse'];
-      return json({
-        ...batch,
-        items: batch.items.map((item) =>
-          item.userId !== carol.cloakId
-            ? item
-            : {
-                userId: carol.cloakId,
-                hostUserId: carol.userId,
-                versions: [
-                  {
-                    keys: {
-                      userId: carol.cloakId,
-                      keyVersion: 1,
-                      cryptoSuite: 1,
-                      encryptionPublicKey: toBase64Url(impostor.keys.encryptionPublicKey),
-                      signingPublicKey: toBase64Url(impostor.keys.signingPublicKey),
-                      recoverySigningPublicKey: toBase64Url(impostor.keys.recoverySigningPublicKey),
-                    },
-                    signature: toBase64Url(impostor.statement.signature),
-                  },
-                ],
-              },
-        ),
-      });
-    };
+    alice.hostile.rewrite = async (request, response) =>
+      asksForKeys(request)
+        ? json(
+            withImpostor(
+              (await response.json()) as Schemas['BatchGetUserKeysResponse'],
+              carol,
+              impostor,
+            ),
+          )
+        : undefined;
 
     await expect(alice.session.addMember(vault.id, carol.userId, 'viewer')).rejects.toBeInstanceOf(
       CloakKeyChangedError,
@@ -511,6 +597,7 @@ describe('a malicious server', () => {
       set: (key, value) => alice.storage.set(key, value),
       delete: (key) => alice.storage.delete(key),
       deletePrefix: (prefix) => alice.storage.deletePrefix(prefix),
+      keys: (prefix) => alice.storage.keys(prefix),
     };
     const forkedSession = await clientBehind(alice.userId, alice.hostile, withoutSnapshots).unlock({
       password: 'password',
@@ -586,6 +673,7 @@ describe('a malicious server', () => {
     await alice.session.addMember(withheld.id, bob.userId, 'editor');
     // The device whose keys leak has written before, so it holds both vault keys.
     const oldKeys = await anotherDevice(bob);
+    const oldSecrets = await openSecrets(bob);
     // Alice creates the nodes, so the logs hold no entry of Bob's old keys, only his writes.
     const inRecordedNode = await alice.session.createNode(recorded.id, 'record');
     const inWithheldNode = await alice.session.createNode(withheld.id, 'record');
@@ -614,22 +702,28 @@ describe('a malicious server', () => {
             )
           : undefined,
       );
-    const replaced = await bob.client.replaceKeys({
+    const replaced = await replaceKeys(bob.client, {
       recoveryKeyCode: bob.recoveryKeyCode,
       newPassword: 'new',
     });
     bob.hostile.intercept = undefined;
     expect(replaced.failedVaults).toEqual([withheld.id]);
 
-    // A thief with Bob's old keys writes in both vaults; the server serves what he signed.
-    const inRecorded = captureNextWrite(oldKeys.hostile);
+    // A thief with Bob's old keys writes in both vaults; the server serves what he signed. The
+    // client of the old keys itself refuses to write where the log no longer commits them, so the
+    // thief signs that write by hand, on the head that recorded the replacement.
     await expect(
       oldKeys.session.writeSection(recorded.id, inRecordedNode, 'general', {
         type: 'server',
         content: 'thief',
       }),
-    ).rejects.toThrow();
-    const recordedWrite = served(await inRecorded, bob.cloakId);
+    ).rejects.toMatchObject({ reason: 'not_an_editor' });
+    const recordedWrite = signedByHand(
+      oldSecrets,
+      bob,
+      await storedWrite(alice.userId, recorded.id, nodeIdFor(inRecordedNode), 'general'),
+      await viewOf(alice.userId, recorded.id),
+    );
     const inWithheld = captureNextWrite(oldKeys.hostile);
     await expect(
       oldKeys.session.writeSection(withheld.id, inWithheldNode, 'general', {
@@ -789,6 +883,63 @@ describe('a malicious server', () => {
     });
   });
 
+  it('cannot get a key, signature or listing of the wrong size or shape used', async () => {
+    const alice = await victim();
+    const vault = await alice.session.createVault();
+    const unexpected = { name: 'CloakApiError', code: 'unexpected_response' };
+    /** Makes [hostile] answer [method] [path] with what [forge] makes of the real answer. */
+    const forging = (
+      hostile: Hostile,
+      method: string,
+      path: string,
+      forge: (served: Record<string, unknown>) => unknown,
+    ) => {
+      hostile.rewrite = async (request, response) =>
+        request.method === method && pathOf(request) === path
+          ? json(forge((await response.json()) as Record<string, unknown>))
+          : undefined;
+    };
+    /** [value], a base64url string, one byte short. */
+    const short = (value: unknown) => (typeof value === 'string' ? value.slice(0, -2) : value);
+
+    forging(alice.hostile, 'GET', '/identity', (identity) => ({
+      ...identity,
+      keys: {
+        ...(identity['keys'] as Record<string, unknown>),
+        signingPublicKey: short((identity['keys'] as Record<string, unknown>)['signingPublicKey']),
+      },
+    }));
+    await expect(
+      alice.client.unlock({ password: 'password', secretKeyCode: alice.secretKeyCode }),
+    ).rejects.toMatchObject(unexpected);
+
+    forging(alice.hostile, 'GET', '/vaults', (page) => ({ ...page, items: {} }));
+    await expect(alice.session.listVaults()).rejects.toMatchObject(unexpected);
+    alice.hostile.rewrite = undefined;
+
+    const reader = await anotherDevice(alice);
+    forging(reader.hostile, 'POST', '/users/keys/batch-get', (batch) => ({
+      ...batch,
+      items: (batch['items'] as Record<string, unknown>[]).map((item) => ({
+        ...item,
+        versions: (item['versions'] as Record<string, unknown>[]).map((version) => ({
+          ...version,
+          signature: short(version['signature']),
+        })),
+      })),
+    }));
+    await expect(reader.session.openVault(vault.id)).rejects.toMatchObject(unexpected);
+
+    forging(reader.hostile, 'GET', `/vaults/${vault.id}/log`, (page) => ({
+      ...page,
+      items: (page['items'] as Record<string, unknown>[]).map((entry) => ({
+        ...entry,
+        signature: short(entry['signature']),
+      })),
+    }));
+    await expect(reader.session.openVault(vault.id)).rejects.toMatchObject(unexpected);
+  });
+
   it('cannot roll a section back to a write a later checkpoint superseded', async () => {
     const alice = await victim();
     const bob = await victim();
@@ -831,6 +982,197 @@ describe('a malicious server', () => {
     expect(attempts).toBe(1);
   });
 
+  it('cannot collect signed versions of a rotation by faking a checkpoint conflict', async () => {
+    const alice = await victim();
+    const vault = await alice.session.createVault();
+    const node = await alice.session.createNode(vault.id, 'record');
+    await alice.session.writeSection(vault.id, node, 'general', { type: 'note', content: 'x' });
+    let rotations = 0;
+    alice.hostile.intercept = (request) => {
+      if (request.method !== 'POST' || pathOf(request) !== `/vaults/${vault.id}/rotations`)
+        return Promise.resolve(undefined);
+      rotations += 1;
+      return Promise.resolve(problem('checkpoint_conflict', 409));
+    };
+    // The server's change counter moves on every read, though no write came.
+    let extra = 0;
+    alice.hostile.rewrite = async (request, response) => {
+      if (request.method !== 'GET' || pathOf(request) !== `/vaults/${vault.id}/section-headers`)
+        return undefined;
+      const page = (await response.json()) as Schemas['SectionHeaderPage'];
+      extra += 1;
+      const last = page.lastChangeSeq + extra;
+      return json({ ...page, throughChangeSeq: last, lastChangeSeq: last });
+    };
+
+    await expect(alice.session.rotate(vault.id)).rejects.toMatchObject({
+      code: 'checkpoint_conflict',
+    });
+    expect(rotations).toBe(1);
+  });
+
+  it('cannot get a person met through a write that does not stand', async () => {
+    const alice = await victim();
+    const carol = await victim();
+    const vault = await alice.session.createVault();
+    const node = await alice.session.createNode(vault.id, 'record');
+    await alice.session.writeSection(vault.id, node, 'general', { type: 'server', content: 'x' });
+    const stored = await storedWrite(alice.userId, vault.id, nodeIdFor(node), 'general');
+    const junk = { ...stored, writerUserId: carol.cloakId };
+    const impostor = await createIdentity(carol.cloakId, 'impostor');
+
+    // A write said to be Carol's, under keys the server chose for her.
+    alice.hostile.rewrite = async (request, response) => {
+      if (asksForKeys(request))
+        return json(
+          withImpostor(
+            (await response.json()) as Schemas['BatchGetUserKeysResponse'],
+            carol,
+            impostor,
+          ),
+        );
+      if (
+        request.method === 'GET' &&
+        pathOf(request) === `/vaults/${vault.id}/sections/${nodeIdFor(node)}/general`
+      )
+        return json({ ...junk, writeHash: toBase64Url(headerWriteHash(fromWireHeader(junk))) });
+      return undefined;
+    };
+    expect(refusal(await alice.session.readSection(vault.id, nodeIdFor(node), 'general'))).toBe(
+      'not_an_editor',
+    );
+
+    alice.hostile.rewrite = undefined;
+    await expect(alice.session.addMember(vault.id, carol.userId, 'viewer')).rejects.toBeInstanceOf(
+      CloakFingerprintRequiredError,
+    );
+  });
+
+  it('cannot get a person met through a log entry that does not verify', async () => {
+    const alice = await victim();
+    const carol = await victim();
+    const vault = await alice.session.createVault();
+    const device = await anotherDevice(alice);
+    const impostor = await createIdentity(carol.cloakId, 'impostor');
+    const forger = await createIdentity(alice.cloakId, 'forger');
+
+    // An entry adding Carol under the server's keys for her, signed by nobody in the vault.
+    device.hostile.rewrite = async (request, response) => {
+      if (asksForKeys(request))
+        return json(
+          withImpostor(
+            (await response.json()) as Schemas['BatchGetUserKeysResponse'],
+            carol,
+            impostor,
+          ),
+        );
+      if (request.method !== 'GET' || pathOf(request) !== `/vaults/${vault.id}/log`)
+        return undefined;
+      const page = (await response.json()) as Schemas['VaultLogPage'];
+      const last = page.items.at(-1);
+      if (last === undefined) return undefined;
+      const fields: LogEntryFields = {
+        vaultId: vault.id,
+        seq: last.seq + 1,
+        previousHash: fromBase64Url(last.entryHash),
+        kind: 'member_added',
+        subjectUserId: carol.cloakId,
+        role: 'viewer',
+        keyVersion: last.keyVersion,
+        subjectKeys: keysDigest(impostor.keys),
+        subjectKeyVersion: 1,
+        requestEnd: true,
+        authorUserId: alice.cloakId,
+        authorKeyVersion: 1,
+      };
+      const forged: Schemas['LogEntry'] = {
+        seq: fields.seq,
+        kind: 'member_added',
+        subjectUserId: carol.cloakId,
+        role: 'viewer',
+        keyVersion: fields.keyVersion,
+        subjectKeys: toBase64Url(keysDigest(impostor.keys)),
+        subjectKeyVersion: 1,
+        requestEnd: true,
+        authorKeyVersion: 1,
+        signature: toBase64Url(signLogEntry(fields, forger.secrets.signingSeed)),
+        authorUserId: alice.cloakId,
+        entryHash: toBase64Url(entryHash(fields)),
+        createdAt: last.createdAt,
+      };
+      return json({ items: [...page.items, forged], headSeq: fields.seq });
+    };
+    await expect(device.session.openVault(vault.id)).rejects.toMatchObject({
+      name: 'CloakVaultLogError',
+    });
+
+    device.hostile.rewrite = undefined;
+    await expect(device.session.addMember(vault.id, carol.userId, 'viewer')).rejects.toBeInstanceOf(
+      CloakFingerprintRequiredError,
+    );
+  });
+
+  it('cannot get a person vouched for by a vault the user never accepted', async () => {
+    const alice = await victim();
+    const mallory = await victim();
+    const carol = await victim();
+    const own = await alice.session.createVault();
+    // A vault an account of the server made, with Alice and Carol in it, that Alice never accepted.
+    const trap = await mallory.session.createVault();
+    await mallory.session.confirmFingerprint(alice.userId, alice.session.fingerprint);
+    await mallory.session.confirmFingerprint(carol.userId, carol.session.fingerprint);
+    await mallory.session.addMember(trap.id, alice.userId, 'viewer');
+    await mallory.session.addMember(trap.id, carol.userId, 'viewer');
+
+    await alice.session.openVault(trap.id);
+    await expect(alice.session.addMember(own.id, carol.userId, 'viewer')).rejects.toBeInstanceOf(
+      CloakFingerprintRequiredError,
+    );
+    await alice.session.acceptVault(trap.id);
+    await alice.session.addMember(own.id, carol.userId, 'viewer');
+  });
+
+  it('cannot make a vault vouch with an acceptance of something else', async () => {
+    const alice = await victim();
+    const mallory = await victim();
+    const dave = await victim();
+    const carol = await victim();
+    const own = await alice.session.createVault();
+    const fromMallory = await mallory.session.createVault();
+    await mallory.session.confirmFingerprint(alice.userId, alice.session.fingerprint);
+    await alice.session.acceptInvitationsFrom(mallory.userId);
+    await mallory.session.addMember(fromMallory.id, alice.userId, 'viewer');
+    // Dave, whom Alice never accepted, adds her to a vault with Carol in it.
+    const trap = await dave.session.createVault();
+    await dave.session.confirmFingerprint(alice.userId, alice.session.fingerprint);
+    await dave.session.confirmFingerprint(carol.userId, carol.session.fingerprint);
+    await dave.session.addMember(trap.id, alice.userId, 'viewer');
+    await dave.session.addMember(trap.id, carol.userId, 'viewer');
+    const viewOf = async (vaultId: string) =>
+      (await (
+        await fetch(`${inject('cloakBaseUrl')}/vaults/${vaultId}`, {
+          headers: { [USER_HEADER]: alice.userId },
+        })
+      ).json()) as Schemas['Vault'];
+    const ownAcceptance = (await viewOf(own.id)).acceptance;
+    const malloryAcceptance = (await viewOf(fromMallory.id)).acceptance;
+    expect(ownAcceptance?.inviterUserId).toBeUndefined();
+    expect(malloryAcceptance?.inviterUserId).toBe(mallory.cloakId);
+
+    // Alice's real signatures, of her own vault and of Mallory, passed off as accepting the trap.
+    for (const acceptance of [ownAcceptance, malloryAcceptance]) {
+      const device = await anotherDevice(alice);
+      device.hostile.rewrite = async (request, response) =>
+        request.method === 'GET' && pathOf(request) === `/vaults/${trap.id}`
+          ? json({ ...((await response.json()) as Schemas['Vault']), accepted: true, acceptance })
+          : undefined;
+      await device.session.openVault(trap.id);
+      await expect(device.session.addMember(own.id, carol.userId, 'viewer')).rejects.toBeInstanceOf(
+        CloakFingerprintRequiredError,
+      );
+    }
+  });
+
   it('cannot get an unconfirmed person added by asking twice', async () => {
     const alice = await victim();
     const carol = await victim();
@@ -859,7 +1201,7 @@ describe('a malicious server', () => {
     await thief.session.confirmFingerprint(carol.userId, carol.session.fingerprint);
     const added = await thief.session.addMember(vault.id, carol.userId, 'viewer');
 
-    const replaced = await bob.client.replaceKeys({
+    const replaced = await replaceKeys(bob.client, {
       recoveryKeyCode: bob.recoveryKeyCode,
       newPassword: 'new',
     });
@@ -995,6 +1337,15 @@ describe('a malicious server', () => {
         nextCursor: 'again',
       }),
     ],
+    [
+      'claims more leaves than a vault has live sections, page after page',
+      (page: Schemas['CheckpointLeafPage']) => ({
+        checkpointSeq: page.checkpointSeq,
+        size: 2_000_000_000,
+        leaves: page.leaves,
+        nextCursor: 'again',
+      }),
+    ],
   ])('cannot serve a checkpoint leaf list that %s', async (_, forge) => {
     const alice = await victim();
     const vault = await alice.session.createVault();
@@ -1080,9 +1431,361 @@ describe('a malicious server', () => {
     expect(refusal(await reader.session.readSection(vault.id, nodeIdFor(node), 'general'))).toBe(
       'bad_ciphertext',
     );
-    serveSection(reader.hostile, { ...general, ciphertext, ciphertextHash });
+    // The other ciphertext's hash, and the write hash it gives, under the signature of the first.
+    const swapped = { ...general, ciphertext, ciphertextHash };
+    serveSection(reader.hostile, {
+      ...swapped,
+      writeHash: toBase64Url(headerWriteHash(fromWireHeader(swapped))),
+    });
     expect(refusal(await reader.session.readSection(vault.id, nodeIdFor(node), 'general'))).toBe(
       'bad_signature',
     );
+  });
+
+  it("cannot skip a new write's signature check by naming a write the device checked", async () => {
+    const alice = await victim();
+    const vault = await alice.session.createVault();
+    const node = await alice.session.createNode(vault.id, 'record');
+    await alice.session.writeSections([
+      { vaultId: vault.id, node, name: 'general', type: 'server', content: 'kept' },
+      { vaultId: vault.id, node, name: 'secrets', type: 'server', content: 'honest' },
+    ]);
+    const general = await storedWrite(alice.userId, vault.id, nodeIdFor(node), 'general');
+    const secrets = await storedWrite(alice.userId, vault.id, nodeIdFor(node), 'secrets');
+
+    const reader = await anotherDevice(alice);
+    expect((await reader.session.readVault(vault.id)).sections).toHaveLength(2);
+
+    // A deletion nobody signed, far ahead of the section's version, claiming the hash of a write
+    // the reader already checked; then the same deletion with the hash it really has.
+    const forged: Schemas['SectionWrite'] = {
+      ...secrets,
+      deleted: true,
+      dataVersion: 2 ** 52,
+      previousWriteHash: secrets.writeHash,
+      signature: toBase64Url(Uint8Array.of(1, ...new Uint8Array(64))),
+      writeHash: general.writeHash,
+    };
+    delete forged.ciphertext;
+    delete forged.ciphertextHash;
+    const honestHash = toBase64Url(headerWriteHash(fromWireHeader(forged)));
+    const feedServing = (write: Schemas['SectionWrite']) => {
+      reader.hostile.rewrite = async (request, response) => {
+        if (request.method !== 'GET' || pathOf(request) !== `/vaults/${vault.id}/sections`)
+          return undefined;
+        const page = (await response.json()) as Schemas['SectionPage'];
+        return json({
+          ...page,
+          items: [...page.items, write],
+          throughChangeSeq: write.changeSeq,
+          lastChangeSeq: write.changeSeq,
+        });
+      };
+    };
+    const secretsIn = async () =>
+      (await reader.session.readVault(vault.id)).sections.find(
+        (section) => section.name === 'secrets',
+      );
+
+    feedServing({ ...forged, changeSeq: secrets.changeSeq + 100 });
+    const copied = await secretsIn();
+    expect(copied === undefined ? 'deleted' : refusal(copied)).toBe('bad_write_hash');
+    feedServing({ ...forged, writeHash: honestHash, changeSeq: secrets.changeSeq + 200 });
+    const own = await secretsIn();
+    expect(own === undefined ? 'deleted' : refusal(own)).toBe('bad_signature');
+
+    // Nothing the forgeries said reached the section's mark: the honest write still stands.
+    reader.hostile.rewrite = undefined;
+    const honest = await reader.session.readSection(vault.id, nodeIdFor(node), 'secrets');
+    expect(honest.status).toBe('ok');
+  });
+
+  it('cannot make a device forget a vault by claiming a departure or deletion it never applied', async () => {
+    const alice = await victim();
+    const bob = await victim();
+    await meet(alice, bob);
+    const left = await alice.session.createVault();
+    await alice.session.addMember(left.id, bob.userId, 'viewer');
+    await bob.session.openVault(left.id);
+
+    // The departure is answered but never stored: Bob is still a member by the real log.
+    bob.hostile.intercept = (request) =>
+      Promise.resolve(
+        request.method === 'POST' && pathOf(request) === `/vaults/${left.id}/departures`
+          ? new Response(null, { status: 204 })
+          : undefined,
+      );
+    await bob.session.leave(left.id);
+    bob.hostile.intercept = undefined;
+    // The device kept its own signed departure as the head, so a log without it is refused.
+    await expect(bob.session.openVault(left.id)).rejects.toMatchObject({ reason: 'rollback' });
+
+    const deleted = await alice.session.createVault();
+    alice.hostile.intercept = (request) =>
+      Promise.resolve(
+        request.method === 'POST' && pathOf(request) === `/vaults/${deleted.id}/deletion`
+          ? new Response(null, { status: 204 })
+          : undefined,
+      );
+    await expect(alice.session.deleteVault(deleted.id)).rejects.toMatchObject({
+      reason: 'state_mismatch',
+    });
+    alice.hostile.intercept = undefined;
+    expect((await alice.session.openVault(deleted.id)).deleted).toBe(false);
+  });
+
+  it('cannot lose an account by dropping the response to a registration or key replacement', async () => {
+    const userId = crypto.randomUUID();
+    const hostile: Hostile = {};
+    const client = clientBehind(userId, hostile, createMemoryStorage());
+    /**
+     * Lets one request through to the real server, then fails as a dropped connection does; with
+     * [identityToo], the read of the identity that follows fails the same way.
+     */
+    const dropResponse = (method: string, path: string, identityToo = false) => {
+      let dropped = false;
+      hostile.intercept = async (request) => {
+        const isIdentityRead = request.method === 'GET' && pathOf(request) === '/identity';
+        if (dropped && identityToo && isIdentityRead) {
+          hostile.intercept = undefined;
+          throw new TypeError('Network error');
+        }
+        if (dropped || request.method !== method || pathOf(request) !== path) return undefined;
+        dropped = true;
+        if (!identityToo) hostile.intercept = undefined;
+        await fetch(request);
+        throw new TypeError('Network error');
+      };
+    };
+    const isNetworkError = (error: unknown) => isCloakApiError(error, 'network_error');
+
+    // Applied, but answered with nothing: the server holds the prepared keys, so it is done.
+    const registration = await client.prepareRegistration({ userId, password: 'password' });
+    dropResponse('POST', '/identity');
+    const session = await registration.complete();
+    expect(await registration.complete()).toBe(session);
+    const elsewhere = () => clientBehind(userId, {}, createMemoryStorage());
+    expect(
+      (
+        await elsewhere().unlock({
+          password: 'password',
+          secretKeyCode: registration.secretKeyCode,
+        })
+      ).fingerprint,
+    ).toBe(session.fingerprint);
+    // Another registration of the same user is refused, and its keys are not taken for the ones held.
+    const other = await client.prepareRegistration({ userId, password: 'other' });
+    await expect(other.complete()).rejects.toSatisfy((error: unknown) =>
+      isCloakApiError(error, 'already_exists'),
+    );
+
+    const replacement = await client.prepareKeyReplacement({
+      recoveryKeyCode: registration.recoveryKeyCode,
+      newPassword: 'new keys',
+    });
+    // Applied, and even the check that followed got nothing: called again, the request answers
+    // `identity_version_conflict`, and the server holds the prepared keys, so it is done.
+    dropResponse('PUT', '/identity/keys', true);
+    await expect(replacement.complete()).rejects.toSatisfy(isNetworkError);
+    const replaced = await replacement.complete();
+    expect(replaced.session.keyVersion).toBe(2);
+    const unlocked = await elsewhere().unlock({
+      password: 'new keys',
+      secretKeyCode: replacement.secretKeyCode,
+    });
+    expect(unlocked.keyVersion).toBe(2);
+    await elsewhere().recover({
+      recoveryKeyCode: replacement.recoveryKeyCode,
+      newPassword: 'recovered',
+    });
+  });
+
+  it('cannot tell a viewer, or keys the log does not commit, that a write succeeded', async () => {
+    const alice = await victim();
+    const bob = await victim();
+    await meet(alice, bob);
+    const vault = await alice.session.createVault();
+    const node = await alice.session.createNode(vault.id, 'record');
+    await alice.session.addMember(vault.id, bob.userId, 'viewer');
+
+    // The server would take the write and echo it as stored.
+    let sent = 0;
+    const acceptWrites = (hostile: Hostile, writerUserId: string) => {
+      hostile.intercept = async (request) => {
+        const match = /^\/vaults\/([^/]+)\/sections\/([^/]+)\/([^/]+)$/.exec(pathOf(request));
+        if (request.method !== 'PUT' || match === null) return undefined;
+        sent += 1;
+        const [, vaultId = '', nodeId = '', sectionName = ''] = match;
+        const input = (await request.json()) as Schemas['SectionWriteInput'];
+        return json(served({ vaultId, nodeId, sectionName, input }, writerUserId));
+      };
+    };
+    acceptWrites(bob.hostile, bob.cloakId);
+    await expect(
+      bob.session.writeSection(vault.id, node, 'general', { type: 'note', content: 'viewer' }),
+    ).rejects.toMatchObject({ name: 'CloakSectionError', reason: 'not_an_editor' });
+
+    // An editor whose key replacement this vault never recorded still writes with old keys there.
+    bob.hostile.intercept = undefined;
+    await alice.session.setRole(vault.id, bob.userId, 'editor');
+    bob.hostile.intercept = (request) =>
+      Promise.resolve(
+        request.method === 'POST' && pathOf(request) === `/vaults/${vault.id}/key-replacements`
+          ? problem('internal_error', 500)
+          : undefined,
+      );
+    const replaced = await replaceKeys(bob.client, {
+      recoveryKeyCode: bob.recoveryKeyCode,
+      newPassword: 'new keys',
+    });
+    expect(replaced.failedVaults).toEqual([vault.id]);
+    acceptWrites(bob.hostile, bob.cloakId);
+    await expect(
+      replaced.session.writeSection(vault.id, node, 'general', { type: 'note', content: 'v2' }),
+    ).rejects.toMatchObject({ name: 'CloakSectionError', reason: 'not_an_editor' });
+    expect(sent).toBe(0);
+  });
+
+  it('cannot make a writer chain to a version past what can be counted', async () => {
+    const alice = await victim();
+    const vault = await alice.session.createVault();
+    const node = await alice.session.createNode(vault.id, 'record');
+    await alice.session.writeSection(vault.id, node, 'general', { type: 'note', content: 'one' });
+    alice.hostile.rewrite = async (request, response) => {
+      if (request.method !== 'POST' || pathOf(request) !== '/section-headers/batch-get')
+        return undefined;
+      const answer = (await response.json()) as Schemas['BatchGetSectionHeadersResponse'];
+      return json({
+        ...answer,
+        items: answer.items.map((item) => ({ ...item, dataVersion: Number.MAX_SAFE_INTEGER })),
+      });
+    };
+    await expect(
+      alice.session.writeSection(vault.id, node, 'general', { type: 'note', content: 'two' }),
+    ).rejects.toMatchObject({ name: 'CloakVaultLogError', reason: 'state_mismatch' });
+  });
+
+  it('cannot make a node read hold more than one page, or page it forever', async () => {
+    const alice = await victim();
+    const vault = await alice.session.createVault();
+    const node = await alice.session.createNode(vault.id, 'record');
+    const nodeId = nodeIdFor(node);
+    for (let start = 0; start < 10; start += 5) {
+      await alice.session.writeSections(
+        Array.from({ length: 5 }, (_, index) => ({
+          vaultId: vault.id,
+          node,
+          name: `large_${String(start + index)}`,
+          type: 'blob',
+          content: 'x'.repeat(1_048_000),
+        })),
+      );
+    }
+    const nodePath = `/nodes/${nodeId}`;
+    let pages = 0;
+
+    // Every page at once, as a server that ignores the budget would send them.
+    alice.hostile.rewrite = async (request, response) => {
+      if (request.method !== 'GET' || pathOf(request) !== nodePath) return undefined;
+      let page = (await response.json()) as Schemas['NodeSections'];
+      const sections = [...page.sections];
+      while (page.nextCursor !== undefined) {
+        const next = await fetch(
+          `${inject('cloakBaseUrl')}${nodePath}?cursor=${encodeURIComponent(page.nextCursor)}`,
+          { headers: request.headers },
+        );
+        page = (await next.json()) as Schemas['NodeSections'];
+        sections.push(...page.sections);
+      }
+      return json({ nodeId, sections });
+    };
+    await expect(alice.session.readNode(nodeId)).rejects.toMatchObject({
+      reason: 'state_mismatch',
+    });
+
+    // A page that brings nothing but promises more.
+    alice.hostile.rewrite = (request) =>
+      Promise.resolve(
+        request.method === 'GET' && pathOf(request) === nodePath
+          ? json({ nodeId, sections: [], nextCursor: 'again' })
+          : undefined,
+      );
+    await expect(alice.session.readNode(nodeId)).rejects.toMatchObject({
+      reason: 'state_mismatch',
+    });
+
+    // The first page again and again, with a cursor to yet another.
+    alice.hostile.rewrite = async (request) => {
+      if (request.method !== 'GET' || pathOf(request) !== nodePath) return undefined;
+      pages += 1;
+      const first = await fetch(`${inject('cloakBaseUrl')}${nodePath}`, {
+        headers: request.headers,
+      });
+      return json({ ...((await first.json()) as Schemas['NodeSections']), nextCursor: 'again' });
+    };
+    await expect(alice.session.readNode(nodeId)).rejects.toMatchObject({
+      reason: 'state_mismatch',
+    });
+    expect(pages).toBe(2);
+
+    alice.hostile.rewrite = undefined;
+    expect((await alice.session.readNode(nodeId)).sections).toHaveLength(10);
+  });
+
+  it('cannot keep a reader paging a log, a change feed or a vault list forever', async () => {
+    const alice = await victim();
+    const vault = await alice.session.createVault();
+    const node = await alice.session.createNode(vault.id, 'record');
+    await alice.session.writeSection(vault.id, node, 'general', { type: 'note', content: 'x' });
+    const reader = await anotherDevice(alice);
+    let pages = 0;
+
+    // The first page of the log, again and again, with a head that is never reached.
+    reader.hostile.rewrite = async (request) => {
+      if (request.method !== 'GET' || pathOf(request) !== `/vaults/${vault.id}/log`)
+        return undefined;
+      pages += 1;
+      const first = await fetch(`${inject('cloakBaseUrl')}/vaults/${vault.id}/log?limit=100`, {
+        headers: request.headers,
+      });
+      const page = (await first.json()) as Schemas['VaultLogPage'];
+      return json({ ...page, headSeq: 1_000_000 });
+    };
+    await expect(reader.session.openVault(vault.id)).rejects.toMatchObject({
+      reason: 'state_mismatch',
+    });
+    expect(pages).toBe(2);
+
+    // Pages that cover one more change each, bring nothing, and push the end further away.
+    pages = 0;
+    reader.hostile.rewrite = (request) => {
+      if (request.method !== 'GET' || pathOf(request) !== `/vaults/${vault.id}/sections`)
+        return Promise.resolve(undefined);
+      pages += 1;
+      const after = Number(new URL(request.url).searchParams.get('afterChange') ?? 0);
+      return Promise.resolve(
+        json({ items: [], removed: [], throughChangeSeq: after + 1, lastChangeSeq: after + 1000 }),
+      );
+    };
+    await expect(reader.session.readVault(vault.id)).rejects.toMatchObject({
+      reason: 'state_mismatch',
+    });
+    expect(pages).toBe(1);
+
+    // The same vaults on every page, with a cursor to yet another.
+    pages = 0;
+    reader.hostile.rewrite = undefined;
+    reader.hostile.intercept = async (request) => {
+      if (request.method !== 'GET' || pathOf(request) !== '/vaults') return undefined;
+      pages += 1;
+      const first = await fetch(`${inject('cloakBaseUrl')}/vaults`, { headers: request.headers });
+      return json({ ...((await first.json()) as Schemas['VaultPage']), nextCursor: 'again' });
+    };
+    await expect(reader.session.deleteAccount()).rejects.toSatisfy((error: unknown) =>
+      isCloakApiError(error, 'unexpected_response'),
+    );
+    expect(pages).toBe(2);
+    reader.hostile.intercept = undefined;
+    expect((await reader.session.openVault(vault.id)).members).toHaveLength(1);
   });
 });

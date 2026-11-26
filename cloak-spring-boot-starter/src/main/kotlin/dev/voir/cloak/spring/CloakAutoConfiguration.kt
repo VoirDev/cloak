@@ -14,6 +14,7 @@ import io.micrometer.core.instrument.MeterRegistry
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass
 import org.springframework.boot.health.contributor.HealthIndicator
 import org.springframework.boot.web.servlet.FilterRegistrationBean
+import org.springframework.boot.webmvc.autoconfigure.DispatcherServletPath
 import org.springframework.context.annotation.Configuration
 import org.springframework.core.Ordered
 import org.springframework.web.servlet.config.annotation.InterceptorRegistry
@@ -41,7 +42,8 @@ import kotlin.time.Instant
 import kotlin.time.toKotlinInstant
 
 /**
- * Serves the Cloak API under `/cloak/v1` in a servlet application with a `DataSource`.
+ * Serves the Cloak API under `/cloak/v1`, below the dispatcher servlet's path, in a servlet
+ * application with a `DataSource`.
  *
  * The host must declare a [CloakPrincipalResolver]; startup fails without one. It may also
  * declare a `java.time.Clock`, a [CloakRequestGuard] to limit requests, and any number of
@@ -193,15 +195,25 @@ public class CloakAutoConfiguration {
     /**
      * Refuses Cloak request bodies over the size limit before they are read.
      *
+     * The filter is mapped where the dispatcher servlet serves Cloak, so under a servlet path such
+     * as `spring.mvc.servlet.path=/api` it guards `/api/cloak/v1/...`.
+     *
      * @param server Cloak operations, whose settings hold the limit.
+     * @param dispatcherServletPath Where Spring Boot maps its dispatcher servlet.
      * @return The filter, on Cloak's paths only.
      */
     @Bean
-    internal fun cloakRequestSizeFilter(server: CloakServer): FilterRegistrationBean<RequestSizeFilter> =
-        FilterRegistrationBean(RequestSizeFilter(server.meta().limits.maxRequestBytes)).apply {
-            addUrlPatterns("${CloakPaths.BASE}/*")
+    internal fun cloakRequestSizeFilter(
+        server: CloakServer,
+        dispatcherServletPath: ObjectProvider<DispatcherServletPath>,
+    ): FilterRegistrationBean<RequestSizeFilter> {
+        val servletPath = dispatcherServletPath.getIfAvailable()
+            ?: error("Cloak needs Spring Boot's DispatcherServlet registration to map its request size limit.")
+        return FilterRegistrationBean(RequestSizeFilter(server.meta().limits.maxRequestBytes)).apply {
+            addUrlPatterns(servletPath.getRelativePath("${CloakPaths.BASE}/*"))
             order = Ordered.HIGHEST_PRECEDENCE + REQUEST_SIZE_FILTER_ORDER
         }
+    }
 
     /**
      * Problem rendering for the Cloak controllers.

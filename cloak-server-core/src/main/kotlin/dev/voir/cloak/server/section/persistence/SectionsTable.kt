@@ -24,7 +24,7 @@ internal object SectionsTable : Table("cloak.sections") {
         )
 
     /** Node of the section. */
-    val nodeId = uuid("node_id").index("ix_sections__node_id")
+    val nodeId = uuid("node_id")
 
     /** Section name. */
     val sectionName = varchar("section_name", 64)
@@ -102,6 +102,8 @@ internal object SectionsTable : Table("cloak.sections") {
             name = "fk_sections__writer_user_id_writer_key_version__identity_keys",
         )
         uniqueIndex("uq_sections__vault_id_change_seq", vaultId, changeSeq)
+        // A node's sections in the order a node read pages them.
+        index("ix_sections__node_id_vault_id_section_name", false, nodeId, vaultId, sectionName)
         index("ix_sections__writer_user_id_writer_key_version", false, writerUserId, writerKeyVersion)
         check("ck_sections__section_name_format") { SqlCondition("section_name ~ '^[a-z][a-z0-9_]{0,63}$'") }
         check("ck_sections__node_type_format") { SqlCondition("node_type ~ '^[a-z][a-z0-9_.-]{0,63}$'") }

@@ -31,6 +31,7 @@ import dev.voir.cloak.server.vault.domain.CheckpointProof
 import dev.voir.cloak.server.vault.domain.LeafProof
 import dev.voir.cloak.server.vault.domain.LogEntry
 import dev.voir.cloak.server.vault.domain.Vault
+import dev.voir.cloak.server.vault.domain.VaultAcceptance
 import dev.voir.cloak.server.vault.domain.VaultKey
 import dev.voir.cloak.server.vault.domain.VaultLogBatchItem
 import dev.voir.cloak.server.vault.domain.VaultLogPage
@@ -56,6 +57,7 @@ import dev.voir.cloak.api.models.BatchGetVaultsResponseItems as ApiBatchGetVault
 import dev.voir.cloak.api.models.SectionWrite as ApiSectionWrite
 import dev.voir.cloak.api.models.UserKeys as ApiUserKeys
 import dev.voir.cloak.api.models.Vault as ApiVault
+import dev.voir.cloak.api.models.VaultAcceptance as ApiVaultAcceptance
 import dev.voir.cloak.api.models.VaultKey as ApiVaultKey
 import dev.voir.cloak.api.models.VaultLogPage as ApiVaultLogPage
 
@@ -76,11 +78,13 @@ internal fun Meta.toApi(): ApiMeta =
             maxBatchSize = limits.maxBatchSize,
             maxPageSize = limits.maxPageSize,
             maxIndexPageSize = limits.maxIndexPageSize,
+            maxPageBytes = limits.maxPageBytes,
             maxMembersPerVault = limits.maxMembersPerVault,
             maxSectionsPerVault = limits.maxSectionsPerVault,
             maxStoredSectionsPerVault = limits.maxStoredSectionsPerVault,
             writePauseSeconds = limits.writePauseSeconds,
             writePauseIntervalSeconds = limits.writePauseIntervalSeconds,
+            maxKeyVersions = limits.maxKeyVersions,
             kdf = LimitsKdf(limits.minKdfMemoryKib, limits.maxKdfMemoryKib, limits.minKdfIterations, limits.maxKdfIterations),
         ),
     )
@@ -135,6 +139,7 @@ internal fun Vault.toApi(): ApiVault =
     ApiVault(
         id = Wire.uuid(id.value),
         accepted = accepted,
+        acceptance = acceptance?.toApi(),
         addedByUserId = addedByUserId?.let { Wire.uuid(it.value) },
         deleted = deleted,
         role = Wire.role(role),
@@ -146,6 +151,10 @@ internal fun Vault.toApi(): ApiVault =
         createdByUserId = Wire.uuid(createdByUserId.value),
         createdAt = Wire.instant(createdAt),
     )
+
+/** Maps the caller's signed acceptance of a vault. */
+private fun VaultAcceptance.toApi(): ApiVaultAcceptance =
+    ApiVaultAcceptance(inviterUserId = inviterUserId?.let { Wire.uuid(it.value) }, keyVersion = keyVersion, signature = Wire.text(signature))
 
 /** Maps a page of vaults. */
 internal fun Page<Vault>.toApi(): VaultPage = VaultPage(nextCursor = nextCursor, items = items.map { it.toApi() })
@@ -273,8 +282,8 @@ internal fun SectionPage.toApi(): ApiSectionPage =
     ApiSectionPage(items.map { it.toApi() }, removed.map { it.toApi() }, throughChangeSeq, lastChangeSeq)
 
 /** Maps a node's readable sections. */
-internal fun NodeSections.toApi(): ApiNodeSections = ApiNodeSections(Wire.uuid(nodeId.value), sections.map { it.toApi() })
+internal fun NodeSections.toApi(): ApiNodeSections = ApiNodeSections(nextCursor = nextCursor, nodeId = Wire.uuid(nodeId.value), sections = sections.map { it.toApi() })
 
 /** Maps several nodes. */
 internal fun NodeSectionsBatch.toApi(): BatchGetNodesResponse =
-    BatchGetNodesResponse(items.map { it.toApi() }, missingNodeIds.map { Wire.uuid(it.value) })
+    BatchGetNodesResponse(items.map { it.toApi() }, missingNodeIds.map { Wire.uuid(it.value) }, unreadNodeIds.map { Wire.uuid(it.value) })

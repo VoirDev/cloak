@@ -4,6 +4,7 @@ import dev.voir.cloak.server.CloakFixture
 import dev.voir.cloak.server.assertCloakError
 import dev.voir.cloak.server.error.CloakErrorCode
 import dev.voir.cloak.server.error.CloakException
+import dev.voir.cloak.server.race
 import dev.voir.cloak.server.meta.Limits
 import dev.voir.cloak.server.protocol.Messages
 import dev.voir.cloak.server.protocol.SectionWriteFields
@@ -17,9 +18,6 @@ import dev.voir.cloak.server.section.domain.SectionName
 import dev.voir.cloak.server.section.domain.SectionRef
 import dev.voir.cloak.server.testing.TestBlobs
 import dev.voir.cloak.server.vault.domain.Role
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -217,7 +215,7 @@ class SectionOperationsTest {
     fun `a node shows each reader only the sections in their vaults`() {
         val shared = cloak.createVault(alice)
         cloak.addMember(alice, shared, bob, Role.VIEWER)
-        cloak.server.members.accept(bob.id, shared)
+        cloak.accept(bob, shared)
         cloak.share(alice, shared, node, "general")
         cloak.write(alice, vault, node, "secrets")
         cloak.write(alice, shared, node, "general")
@@ -264,27 +262,6 @@ class SectionOperationsTest {
         // Either the write lands first and the rotation's checkpoint no longer matches, or the
         // rotation lands first and the write's head is stale. Never both.
         assertTrue(outcomes == listOf(null, CloakErrorCode.CHECKPOINT_CONFLICT) || outcomes == listOf(CloakErrorCode.NOT_FOUND, null))
-    }
-
-    /** Runs tasks at once; returns each one's error code, or `null` when it succeeded. */
-    private fun race(tasks: List<() -> Any>): List<CloakErrorCode?> {
-        val pool = Executors.newFixedThreadPool(tasks.size)
-        val start = CountDownLatch(1)
-        val futures = tasks.map { task ->
-            pool.submit<CloakErrorCode?> {
-                start.await()
-                try {
-                    task()
-                    null
-                } catch (error: CloakException) {
-                    error.code
-                }
-            }
-        }
-        start.countDown()
-        val outcomes = futures.map { it.get(60, TimeUnit.SECONDS) }
-        pool.shutdown()
-        return outcomes
     }
 
     /** Retries a write that lost a race for the vault's head, as a client would. */

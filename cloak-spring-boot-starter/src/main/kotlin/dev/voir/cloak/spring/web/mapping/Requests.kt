@@ -1,5 +1,6 @@
 package dev.voir.cloak.spring.web.mapping
 
+import dev.voir.cloak.api.models.AcceptInviterRequest
 import dev.voir.cloak.api.models.AddMemberRequest
 import dev.voir.cloak.api.models.BatchGetCheckpointProofsRequest
 import dev.voir.cloak.api.models.BatchGetSectionHeadersRequest
@@ -27,6 +28,7 @@ import dev.voir.cloak.server.section.domain.BatchWriteItem
 import dev.voir.cloak.server.section.domain.NodeId
 import dev.voir.cloak.server.section.domain.SectionRef
 import dev.voir.cloak.server.section.domain.SectionWriteInput
+import dev.voir.cloak.server.vault.domain.Acceptance
 import dev.voir.cloak.server.vault.domain.AddMemberCommand
 import dev.voir.cloak.server.vault.domain.CheckpointProofQuery
 import dev.voir.cloak.server.vault.domain.CreateVaultCommand
@@ -41,6 +43,7 @@ import dev.voir.cloak.server.vault.domain.SetMemberRoleCommand
 import dev.voir.cloak.server.vault.domain.VaultId
 import dev.voir.cloak.server.vault.domain.VaultLogQuery
 import dev.voir.cloak.server.vault.domain.VaultRotation
+import dev.voir.cloak.api.models.Acceptance as ApiAcceptance
 import dev.voir.cloak.api.models.BatchWriteItem as ApiBatchWriteItem
 import dev.voir.cloak.api.models.KdfParams as ApiKdfParams
 import dev.voir.cloak.api.models.LeftOutWrite as ApiLeftOutWrite
@@ -49,8 +52,9 @@ import dev.voir.cloak.api.models.MemberEnvelope as ApiMemberEnvelope
 import dev.voir.cloak.api.models.SectionRef as ApiSectionRef
 import dev.voir.cloak.api.models.SectionWriteInput as ApiSectionWriteInput
 
-// Generated request models to core commands. Jackson already enforced required fields, JSON
-// types, UUIDs and enums; these parse the strings left and name each JSON Pointer.
+// Generated request models to core commands. CloakJsonConverter's mapper already enforced
+// required fields, JSON types without coercion, UUIDs and enums; these parse the strings left and
+// name each JSON Pointer.
 
 /** Maps KDF parameters at [pointer]. */
 internal fun ApiKdfParams.toCore(pointer: String): KdfParams {
@@ -129,9 +133,15 @@ private fun List<ApiLeftOutWrite>?.toCore(): List<LeftOutWrite> =
         )
     }
 
+/** Maps a signed acceptance at [pointer]; empty for the body. */
+internal fun ApiAcceptance.toCore(pointer: String): Acceptance = Acceptance(keyVersion, Wire.bytes(signature, "$pointer/signature"))
+
+/** Maps a signed acceptance of a person. */
+internal fun AcceptInviterRequest.toAcceptance(): Acceptance = Acceptance(keyVersion, Wire.bytes(signature, "/signature"))
+
 /** Maps a vault creation. */
 internal fun CreateVaultRequest.toCommand(): CreateVaultCommand =
-    CreateVaultCommand(VaultId(Wire.uuid(id)), Wire.bytes(keyEnvelope, "/keyEnvelope"), log.toCore("/log"))
+    CreateVaultCommand(VaultId(Wire.uuid(id)), Wire.bytes(keyEnvelope, "/keyEnvelope"), log.toCore("/log"), acceptance.toCore("/acceptance"))
 
 /** Maps a new member. */
 internal fun AddMemberRequest.toCommand(): AddMemberCommand =

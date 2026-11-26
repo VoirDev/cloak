@@ -1,6 +1,14 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 
-import { CloakApiError, isCloakApiError } from '../src/CloakApiError.ts';
+import { CloakApiError, isCloakApiError, type CloakApiErrorCode } from '../src/CloakApiError.ts';
+import type { Schemas } from '../src/api.ts';
+
+/** The codes {@link CloakApiErrorCode} names, without the open end that keeps unknown ones. */
+type NamedCode<Code = CloakApiErrorCode> = Code extends unknown
+  ? string extends Code
+    ? never
+    : Code
+  : never;
 
 describe('CloakApiError', () => {
   it('reads code, version and field errors from a problem body', () => {
@@ -33,5 +41,9 @@ describe('CloakApiError', () => {
 
     expect(error.code).toBe('unexpected_response');
     expect(isCloakApiError(error, 'not_found')).toBe(false);
+  });
+
+  it('names every error code the API has', () => {
+    expectTypeOf<Exclude<Schemas['ErrorCode'], NamedCode>>().toEqualTypeOf<never>();
   });
 });

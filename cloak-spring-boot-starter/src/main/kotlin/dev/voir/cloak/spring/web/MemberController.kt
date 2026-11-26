@@ -1,5 +1,6 @@
 package dev.voir.cloak.spring.web
 
+import dev.voir.cloak.api.models.Acceptance
 import dev.voir.cloak.api.models.AddMemberRequest
 import dev.voir.cloak.api.models.DeliverEnvelopeRequest
 import dev.voir.cloak.api.models.LeaveVaultRequest
@@ -10,6 +11,7 @@ import dev.voir.cloak.api.models.Vault
 import dev.voir.cloak.server.CloakServer
 import dev.voir.cloak.spring.web.mapping.toApi
 import dev.voir.cloak.spring.web.mapping.toCommand
+import dev.voir.cloak.spring.web.mapping.toCore
 import jakarta.servlet.http.HttpServletRequest
 import org.springframework.http.HttpStatus
 import org.springframework.web.bind.annotation.PatchMapping
@@ -78,12 +80,12 @@ internal class MemberController(
     fun rotate(request: HttpServletRequest, @PathVariable vaultId: String, @RequestBody body: RotateVaultRequest): Vault =
         cloak.members.rotate(callers.require(request), Params.vault(vaultId), body.toCommand()).toApi()
 
-    /** `PUT /vaults/{vaultId}/acceptance`: the caller accepts a vault they were added to. */
+    /** `PUT /vaults/{vaultId}/acceptance`: the caller accepts a vault they were added to, signed. */
     @PutMapping("/acceptance")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     @CloakOperation("acceptVault")
-    fun accept(request: HttpServletRequest, @PathVariable vaultId: String) {
-        cloak.members.accept(callers.require(request), Params.vault(vaultId))
+    fun accept(request: HttpServletRequest, @PathVariable vaultId: String, @RequestBody body: Acceptance) {
+        cloak.members.accept(callers.require(request), Params.vault(vaultId), body.toCore(""))
     }
 
     /** `POST /vaults/{vaultId}/key-replacements`. */

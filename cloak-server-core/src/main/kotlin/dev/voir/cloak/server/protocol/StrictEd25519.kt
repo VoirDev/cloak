@@ -70,8 +70,8 @@ internal object StrictEd25519 {
         if (publicKey.size != 32) return SignatureRefusal.NON_CANONICAL_KEY
         val raw = signatureBlob.toByteArray(startIndex = 1)
         if (littleEndian(raw.copyOfRange(32, 64)) >= GROUP_ORDER) return SignatureRefusal.NON_CANONICAL_SIGNATURE
-        if (yCoordinate(raw.copyOfRange(0, 32)) >= FIELD_PRIME) return SignatureRefusal.NON_CANONICAL_SIGNATURE
-        if (yCoordinate(publicKey.toByteArray()) >= FIELD_PRIME) return SignatureRefusal.NON_CANONICAL_KEY
+        if (!isCanonicalPoint(raw.copyOfRange(0, 32))) return SignatureRefusal.NON_CANONICAL_SIGNATURE
+        if (!isCanonicalPoint(publicKey.toByteArray())) return SignatureRefusal.NON_CANONICAL_KEY
         if (isSmallOrder(publicKey)) return SignatureRefusal.SMALL_ORDER_KEY
         return try {
             val key = KeyFactory.getInstance("Ed25519")
@@ -95,7 +95,17 @@ internal object StrictEd25519 {
      * @return Whether the key must be refused.
      */
     fun isUnusableKey(publicKey: ByteString): Boolean =
-        publicKey.size != 32 || yCoordinate(publicKey.toByteArray()) >= FIELD_PRIME || isSmallOrder(publicKey)
+        publicKey.size != 32 || !isCanonicalPoint(publicKey.toByteArray()) || isSmallOrder(publicKey)
+
+    /**
+     * Whether a 32-byte encoding is canonical: `y` below the field prime, and no sign bit on a point
+     * whose `x` is 0, which only `y` = 1 and `y` = p − 1 have (`PROTOCOL.md` §2).
+     */
+    private fun isCanonicalPoint(point: ByteArray): Boolean {
+        val y = yCoordinate(point)
+        val signed = point[31].toInt() and 0x80 != 0
+        return y < FIELD_PRIME && !(signed && (y == BigInteger.ONE || y == FIELD_PRIME - BigInteger.ONE))
+    }
 
     /** Whether a 32-byte key encodes a small-order point. */
     private fun isSmallOrder(publicKey: ByteString): Boolean =

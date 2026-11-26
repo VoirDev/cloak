@@ -7,7 +7,9 @@ import dev.voir.cloak.server.identity.domain.HostUserId
 import dev.voir.cloak.server.identity.domain.KdfParams
 import dev.voir.cloak.server.identity.domain.UpdateCredentialsCommand
 import dev.voir.cloak.server.identity.domain.UserId
+import dev.voir.cloak.server.meta.Limits
 import dev.voir.cloak.server.protocol.Messages
+import dev.voir.cloak.server.race
 import dev.voir.cloak.server.testing.TestBlobs
 import dev.voir.cloak.server.testing.TestClient
 import kotlinx.io.bytestring.ByteString
@@ -46,7 +48,34 @@ class IdentityOperationsTest {
     }
 
     @Test
-    fun `refuses a statement the signing key did not sign, a small-order key and weak KDF parameters`() {
+    fun `an identity holds at most 100 key versions`() {
+        val alice = cloak.user()
+        repeat(Limits.MAX_KEY_VERSIONS - 1) { cloak.replaceKeys(alice) }
+
+        val refused = assertCloakError(CloakErrorCode.VALIDATION_FAILED) { cloak.server.identity.replaceKeys(alice.id, alice.replacement()) }
+
+        assertEquals("max_key_versions", refused.fieldErrors.single().code)
+        assertEquals(Limits.MAX_KEY_VERSIONS, cloak.server.identity.get(alice.id).keys.keyVersion)
+        assertEquals(Limits.MAX_KEY_VERSIONS, cloak.server.meta().limits.maxKeyVersions)
+    }
+
+    @Test
+    fun `racing registrations of one signing key by several users store it once and refuse the rest cleanly`() {
+        val owner = TestClient()
+        val users = List(8) { TestClient() }
+        val commands = users.associateWith { user ->
+            owner.registration().copy(signature = owner.sign(Messages.keyStatement(owner.keys.copy(userId = user.id), null)))
+        }
+
+        val outcomes = race(commands.map { (user, command) -> { cloak.server.identity.register(user.hostUserId, command) } })
+
+        assertEquals(1, outcomes.count { it == null }, "$outcomes")
+        assertEquals(users.size - 1, outcomes.count { it == CloakErrorCode.ALREADY_EXISTS }, "$outcomes")
+        assertEquals(1L, cloak.number("select count(*) from cloak.identities"))
+    }
+
+    @Test
+    fun `refuses a statement the signing key did not sign, unusable keys and weak KDF parameters`() {
         val bob = TestClient()
         val registration = bob.registration()
 
@@ -56,6 +85,15 @@ class IdentityOperationsTest {
         val identityPoint = ByteString(byteArrayOf(1) + ByteArray(31))
         assertCloakError(CloakErrorCode.VALIDATION_FAILED) {
             cloak.server.identity.register(bob.hostUserId, registration.copy(recoverySigningPublicKey = identityPoint))
+        }
+        // The identity point with the sign bit set: not canonical, though not in the small-order list.
+        val signedIdentity = ByteString(byteArrayOf(1) + ByteArray(30) + byteArrayOf(0x80.toByte()))
+        assertCloakError(CloakErrorCode.VALIDATION_FAILED) {
+            cloak.server.identity.register(bob.hostUserId, registration.copy(recoverySigningPublicKey = signedIdentity))
+        }
+        // An X25519 key of small order, which no vault key could be sealed to.
+        assertCloakError(CloakErrorCode.VALIDATION_FAILED) {
+            cloak.server.identity.register(bob.hostUserId, registration.copy(encryptionPublicKey = ByteString(ByteArray(32))))
         }
         assertCloakError(CloakErrorCode.VALIDATION_FAILED) {
             cloak.server.identity.register(bob.hostUserId, registration.copy(kdf = registration.kdf.copy(iterations = 11)))

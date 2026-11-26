@@ -7,7 +7,7 @@ over HTTP.
 
 ```kotlin
 CloakMigrations.migrate(dataSource) // once at startup, before serving requests
-val cloak = CloakServer(dataSource, clock)
+val cloak = CloakServer(dataSource, Clock.System, CloakSettings.defaults()) // kotlin.time.Clock
 ```
 
 How to install, configure and run it, the host APIs and the data it keeps are in

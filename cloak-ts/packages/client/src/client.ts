@@ -10,6 +10,7 @@ import {
   fromRecoveryKeyCode,
   fromSecretKeyCode,
   isCloakCryptoError,
+  keysDigest,
   openPrivateKeyBundle,
   openRecoveryKeyBundle,
   randomBytes,
@@ -29,7 +30,7 @@ import {
   type PublicKeys,
 } from '@voirdev/cloak-crypto';
 
-import { CloakApiError, isCloakApiError } from './CloakApiError.ts';
+import { CloakApiError, isCloakApiError, type CloakApiErrorCode } from './CloakApiError.ts';
 import { CloakKeyChangedError } from './CloakKeyChangedError.ts';
 import { CloakSecretKeyMissingError } from './CloakSecretKeyMissingError.ts';
 import { CloakUnlockError, type CloakUnlockErrorReason } from './CloakUnlockError.ts';
@@ -37,8 +38,20 @@ import { body, createApi, type CloakHttpOptions, type Schemas } from './api.ts';
 import { createKeyring } from './keyring.ts';
 import { createSession, type CloakSession } from './session.ts';
 import { createMemoryStorage, type CloakStorage } from './storage/CloakStorage.ts';
-import { openLocalState, secretKeyRecord, userRecords } from './storage/localState.ts';
-import { fromWireKdf, fromWireKeys, toWireKdf } from './wire.ts';
+import {
+  moveLocalState,
+  openLocalState,
+  secretKeyRecord,
+  userRecords,
+} from './storage/localState.ts';
+import {
+  fromWireKdf,
+  fromWireKeys,
+  takeListed,
+  toWireKdf,
+  validIdentity,
+  validVaultPage,
+} from './wire.ts';
 
 /** Options of {@link createCloakClient}. */
 export interface CloakClientOptions extends CloakHttpOptions {
@@ -66,7 +79,7 @@ export interface RememberSecretKeyOption {
   readonly rememberSecretKey?: boolean | undefined;
 }
 
-/** A session together with the codes to show the user exactly once. */
+/** A recovered session together with the codes to show the user exactly once. */
 export interface CredentialsResult {
   /** The unlocked session. */
   readonly session: CloakSession;
@@ -76,8 +89,38 @@ export interface CredentialsResult {
   readonly recoveryKeyCode: string;
 }
 
+/**
+ * New credentials made on this device but not sent yet: show both codes, have the user keep them,
+ * then send them with {@link PreparedCredentials.complete}. The codes come before the request
+ * because a request whose response is lost may still have been applied: codes shown only
+ * afterwards would then be gone, and the account with them.
+ *
+ * @typeParam Result What {@link PreparedCredentials.complete} returns.
+ */
+export interface PreparedCredentials<Result> {
+  /** Secret key code (`CS1-…`); every new device needs it. */
+  readonly secretKeyCode: string;
+  /** Recovery key code (`CR1-…`) for the printable kit. */
+  readonly recoveryKeyCode: string;
+  /**
+   * Sends the prepared credentials and opens a session with them. Call it once the user has kept
+   * both codes. It may be called again after any failure: when the server answered nothing
+   * (`network_error`) or a conflict, it reads the identity the server holds and finishes when
+   * that is exactly the prepared public keys, as after an earlier attempt that was applied but
+   * whose response was lost. Once it succeeded, it returns the same result again.
+   *
+   * @returns The result, with a session of the new credentials.
+   * @throws {CloakApiError} the request's own error when the server does not hold the prepared
+   *   keys, such as `already_exists` for another registration or `identity_version_conflict`
+   *   for another replacement.
+   */
+  complete(): Promise<Result>;
+}
+
 /** The result of a key replacement. */
-export interface KeyReplacementResult extends CredentialsResult {
+export interface KeyReplacementResult {
+  /** The unlocked session, with the new keys. */
+  readonly session: CloakSession;
   /** Vaults where recording the new keys failed; retry with `recordKeyReplacement`. */
   readonly failedVaults: readonly string[];
   /**
@@ -85,13 +128,18 @@ export interface KeyReplacementResult extends CredentialsResult {
    * only vaults that have any. Show them for review (`PROTOCOL.md` §5.6).
    */
   readonly unrecognizedEntries: Readonly<Record<string, readonly number[]>>;
+  /**
+   * Vaults whose acceptance the replaced keys signed without this device. They vouch for nobody
+   * until the user accepts them again; show them for review (`PROTOCOL.md` §5.6 step 6).
+   */
+  readonly unrecognizedAcceptances: readonly string[];
 }
 
 /**
  * What the server knows of the signed-in user's identity:
  *
  * - `registered`: it exists; {@link CloakClient.unlock} opens it;
- * - `none`: the user never registered; {@link CloakClient.register} may follow;
+ * - `none`: the user never registered; {@link CloakClient.prepareRegistration} may follow;
  * - `deleted`: it was deleted and left a tombstone; this host user id can never register again.
  */
 export type IdentityStatus = 'registered' | 'none' | 'deleted';
@@ -100,8 +148,8 @@ export type IdentityStatus = 'registered' | 'none' | 'deleted';
 export interface CloakClient {
   /**
    * Tells whether the signed-in user has an identity, before asking for any password, so an app
-   * knows whether to set the vault up ({@link register}) or unlock it ({@link unlock}). Needs no
-   * password or secret key and reads nothing from this device.
+   * knows whether to set the vault up ({@link prepareRegistration}) or unlock it ({@link unlock}).
+   * Needs no password or secret key and reads nothing from this device.
    *
    * @param options.signal Aborts the request; the promise then rejects with the `AbortError`.
    * @throws {CloakApiError} as every request does (`unauthenticated`, `network_error`, a
@@ -111,13 +159,18 @@ export interface CloakClient {
   identityStatus(options?: { readonly signal?: AbortSignal | undefined }): Promise<IdentityStatus>;
 
   /**
-   * Registers the signed-in host user, named by the host's own id of them (`userId`), which the
-   * server's authentication must give for the same request. Show both codes once and ask the user
-   * to save them.
+   * Makes the identity of the signed-in host user, named by the host's own id of them (`userId`),
+   * which the server's authentication must give for the same request (`PROTOCOL.md` §12.1).
+   * Nothing is sent yet: show both codes, ask the user to keep them, then call
+   * {@link PreparedCredentials.complete}, which registers and returns the session.
+   *
+   * @param options.userId The host's id of the signed-in user.
+   * @param options.password The new master password.
+   * @returns The codes to show and the step that registers.
    */
-  register(
+  prepareRegistration(
     options: { readonly userId: string; readonly password: string } & RememberSecretKeyOption,
-  ): Promise<CredentialsResult>;
+  ): Promise<PreparedCredentials<CloakSession>>;
 
   /**
    * Unlocks the signed-in user's identity on this device.
@@ -159,18 +212,23 @@ export interface CloakClient {
   }): Promise<void>;
 
   /**
-   * Replaces identity keys that may have leaked (`PROTOCOL.md` §5.6), with the recovery key: new
-   * keys, a new recovery key, secret key and password, recorded in every vault. Admins should
-   * then rotate those vaults.
+   * Makes new identity keys to replace ones that may have leaked (`PROTOCOL.md` §5.6), with the
+   * recovery key: new keys, a new recovery key, secret key and password. Nothing is sent yet: show
+   * both new codes, ask the user to keep them, then call {@link PreparedCredentials.complete},
+   * which replaces the keys, records them in every vault and signs the user's acceptances again.
+   * Admins should then rotate those vaults.
    *
+   * @param options.recoveryKeyCode The current recovery key code.
+   * @param options.newPassword The new master password.
+   * @returns The new codes to show and the step that replaces the keys.
    * @throws {CloakUnlockError} `wrong_recovery_key` for a recovery key that is not the user's.
    */
-  replaceKeys(
+  prepareKeyReplacement(
     options: {
       readonly recoveryKeyCode: string;
       readonly newPassword: string;
     } & RememberSecretKeyOption,
-  ): Promise<KeyReplacementResult>;
+  ): Promise<PreparedCredentials<KeyReplacementResult>>;
 
   /** Tells whether this device remembers a user's secret key, by host user id. */
   remembersSecretKey(hostUserId: string): Promise<boolean>;
@@ -198,18 +256,23 @@ export function createCloakClient(options: CloakClientOptions): CloakClient {
   const storage = options.storage ?? createMemoryStorage();
   const { passwordHasher } = options;
 
-  /** Opens a session for unlocked keys. */
-  function sessionFor(
+  /**
+   * Opens a session for unlocked keys. The first unlock with a bundle that carries a previous
+   * `localStateKey` moves every record of the user to the current one (`PROTOCOL.md` §12.2).
+   */
+  async function sessionFor(
     keys: PublicKeys,
     secrets: IdentitySecrets,
     hostUserId: string,
-  ): CloakSession {
-    const local = openLocalState(
-      storage,
-      keys.userId,
-      secrets.localStateKey,
-      secrets.previousLocalStateKey,
-    );
+  ): Promise<CloakSession> {
+    if (secrets.previousLocalStateKey !== undefined)
+      await moveLocalState(
+        storage,
+        keys.userId,
+        secrets.localStateKey,
+        secrets.previousLocalStateKey,
+      );
+    const local = openLocalState(storage, keys.userId, secrets.localStateKey);
     const keyring = createKeyring(api, local, keys, hostUserId);
     return createSession({
       api,
@@ -224,7 +287,9 @@ export function createCloakClient(options: CloakClientOptions): CloakClient {
    * identity's Cloak id (`PROTOCOL.md` §5.0).
    */
   async function currentIdentity(signal?: AbortSignal) {
-    const identity = await body(api.GET('/identity', signal === undefined ? {} : { signal }));
+    const identity = validIdentity(
+      await body(api.GET('/identity', signal === undefined ? {} : { signal })),
+    );
     const keys = fromWireKeys(identity.keys);
     if (!derives(identity.hostUserId, keys.userId)) throw new CloakApiError(0, undefined);
     return { identity, keys, hostUserId: identity.hostUserId };
@@ -247,7 +312,11 @@ export function createCloakClient(options: CloakClientOptions): CloakClient {
     if (!matches) throw new CloakKeyChangedError(hostUserId, keys.keyVersion, undefined, undefined);
   }
 
-  /** Opens the signed-in user's private keys with the password and secret key. */
+  /**
+   * Opens the signed-in user's private keys with the password and secret key. The caller owns
+   * the returned secret key, a copy, and overwrites it once done; it is overwritten here when
+   * opening fails.
+   */
   async function openIdentity(password: string, secretKeyCode: string | undefined) {
     const { identity, keys, hostUserId } = await currentIdentity();
     const secretKey =
@@ -255,21 +324,26 @@ export function createCloakClient(options: CloakClientOptions): CloakClient {
         ? await storage.get(secretKeyRecord(keys.userId))
         : fromSecretKeyCode(secretKeyCode);
     if (secretKey === undefined) throw new CloakSecretKeyMissingError(hostUserId);
-    const kdf = fromWireKdf(identity.kdf);
-    requireKdfParams(kdf);
-    const masterKey = await deriveMasterKey({
-      password,
-      secretKey,
-      userId: keys.userId,
-      kdf,
-      passwordHasher,
-    });
-    const secrets = opening('wrong_credentials', () =>
-      openPrivateKeyBundle(masterKey, keys, fromBase64Url(identity.privateKeyBundle)),
-    );
-    masterKey.fill(0);
-    requireOwnKeys(keys, secrets, hostUserId);
-    return { identity, keys, hostUserId, secretKey, secrets };
+    try {
+      const kdf = fromWireKdf(identity.kdf);
+      requireKdfParams(kdf);
+      const masterKey = await deriveMasterKey({
+        password,
+        secretKey,
+        userId: keys.userId,
+        kdf,
+        passwordHasher,
+      });
+      const secrets = opening('wrong_credentials', () =>
+        openPrivateKeyBundle(masterKey, keys, fromBase64Url(identity.privateKeyBundle)),
+      );
+      masterKey.fill(0);
+      requireOwnKeys(keys, secrets, hostUserId);
+      return { identity, keys, hostUserId, secretKey, secrets };
+    } catch (error: unknown) {
+      secretKey.fill(0);
+      throw error;
+    }
   }
 
   /** Seals private keys under a new password and secret key. */
@@ -314,22 +388,73 @@ export function createCloakClient(options: CloakClientOptions): CloakClient {
   async function allVaultIds(): Promise<string[]> {
     // Accepted or not: a key replacement must be recorded wherever the user is a member, and
     // acceptance is only the server's listing (`PROTOCOL.md` §12.4).
-    const ids: string[] = [];
+    const ids = new Set<string>();
     for (const pending of [false, true]) {
+      const listed = new Set<string>();
       let cursor: string | undefined;
       do {
-        const page: Schemas['VaultPage'] = await body(
-          api.GET('/vaults', {
-            params: {
-              query: { limit: 100, pending, ...(cursor === undefined ? {} : { cursor }) },
-            },
-          }),
+        const page = validVaultPage(
+          await body(
+            api.GET('/vaults', {
+              params: {
+                query: { limit: 100, pending, ...(cursor === undefined ? {} : { cursor }) },
+              },
+            }),
+          ),
         );
-        ids.push(...page.items.map((vault) => vault.id));
         cursor = page.nextCursor;
+        takeListed(
+          listed,
+          page.items.map((vault) => vault.id),
+          cursor !== undefined,
+        );
       } while (cursor !== undefined);
+      for (const id of listed) ids.add(id);
     }
-    return [...new Set(ids)];
+    return [...ids];
+  }
+
+  /**
+   * Whether the server holds exactly [prepared] as the signed-in user's current keys: the same
+   * version with the same `keysDigest`, which only the request that sent them can have made.
+   */
+  async function holds(prepared: PublicKeys): Promise<boolean> {
+    try {
+      const { keys } = await currentIdentity();
+      return (
+        keys.keyVersion === prepared.keyVersion &&
+        equalBytes(keysDigest(keys), keysDigest(prepared))
+      );
+    } catch (error: unknown) {
+      if (isCloakApiError(error, 'identity_required')) return false;
+      throw error;
+    }
+  }
+
+  /**
+   * The {@link PreparedCredentials.complete} of prepared keys: [send] their request, then
+   * [finish]. A request that got no response, or the [conflict] an earlier attempt that was
+   * applied would cause, counts as sent when the server holds exactly [prepared]; nothing is
+   * sent again, since the server refuses the same keys twice.
+   */
+  function completion<Result>(
+    prepared: PublicKeys,
+    conflict: CloakApiErrorCode,
+    send: () => Promise<void>,
+    finish: () => Promise<Result>,
+  ): () => Promise<Result> {
+    let done: { readonly result: Result } | undefined;
+    return async () => {
+      if (done !== undefined) return done.result;
+      try {
+        await send();
+      } catch (error: unknown) {
+        const unsure = isCloakApiError(error, 'network_error') || isCloakApiError(error, conflict);
+        if (!unsure || !(await holds(prepared))) throw error;
+      }
+      done = { result: await finish() };
+      return done.result;
+    };
   }
 
   return {
@@ -346,125 +471,180 @@ export function createCloakClient(options: CloakClientOptions): CloakClient {
       }
     },
 
-    async register({ userId: hostUserId, password, rememberSecretKey }) {
+    async prepareRegistration({ userId: hostUserId, password, rememberSecretKey }) {
       const identity = await createIdentity(cloakUserId(hostUserId), password, passwordHasher);
-      await body(
-        api.POST('/identity', {
-          body: {
-            cryptoSuite: CRYPTO_SUITE,
-            encryptionPublicKey: toBase64Url(identity.keys.encryptionPublicKey),
-            signingPublicKey: toBase64Url(identity.keys.signingPublicKey),
-            recoverySigningPublicKey: toBase64Url(identity.keys.recoverySigningPublicKey),
-            signature: toBase64Url(identity.statement.signature),
-            kdf: toWireKdf(identity.kdf),
-            privateKeyBundle: toBase64Url(identity.privateKeyBundle),
-            recoveryKeyBundle: toBase64Url(identity.recoveryKeyBundle),
-          },
-        }),
-      );
-      await remember(identity.keys.userId, identity.secretKey, rememberSecretKey);
+      const recoveryKeyCode = toRecoveryKeyCode(identity.recoveryKey);
+      // Only the code is shown from here on; the recovery bundle is sealed already.
+      identity.recoveryKey.fill(0);
       return {
-        session: sessionFor(identity.keys, identity.secrets, hostUserId),
         secretKeyCode: toSecretKeyCode(identity.secretKey),
-        recoveryKeyCode: toRecoveryKeyCode(identity.recoveryKey),
+        recoveryKeyCode,
+        complete: completion(
+          identity.keys,
+          'already_exists',
+          async () => {
+            await body(
+              api.POST('/identity', {
+                body: {
+                  cryptoSuite: CRYPTO_SUITE,
+                  encryptionPublicKey: toBase64Url(identity.keys.encryptionPublicKey),
+                  signingPublicKey: toBase64Url(identity.keys.signingPublicKey),
+                  recoverySigningPublicKey: toBase64Url(identity.keys.recoverySigningPublicKey),
+                  signature: toBase64Url(identity.statement.signature),
+                  kdf: toWireKdf(identity.kdf),
+                  privateKeyBundle: toBase64Url(identity.privateKeyBundle),
+                  recoveryKeyBundle: toBase64Url(identity.recoveryKeyBundle),
+                },
+              }),
+            );
+          },
+          async () => {
+            await remember(identity.keys.userId, identity.secretKey, rememberSecretKey);
+            const session = await sessionFor(identity.keys, identity.secrets, hostUserId);
+            // Kept until now, since a completion that failed may need it again.
+            identity.secretKey.fill(0);
+            return session;
+          },
+        ),
       };
     },
 
     async unlock({ password, secretKeyCode, rememberSecretKey }) {
       const { keys, hostUserId, secretKey, secrets } = await openIdentity(password, secretKeyCode);
-      if (secretKeyCode !== undefined) await remember(keys.userId, secretKey, rememberSecretKey);
+      try {
+        if (secretKeyCode !== undefined) await remember(keys.userId, secretKey, rememberSecretKey);
+      } finally {
+        secretKey.fill(0);
+      }
       return sessionFor(keys, secrets, hostUserId);
     },
 
     async changePassword({ password, newPassword, secretKeyCode }) {
       const { identity, keys, secretKey, secrets } = await openIdentity(password, secretKeyCode);
-      const request = await newCredentials(
-        keys,
-        secrets,
-        newPassword,
-        secretKey,
-        identity.credentialsVersion,
-      );
-      // No session holds these keys; nothing needs them past sealing and signing the new bundle.
-      wipeIdentitySecrets(secrets);
+      let request: Schemas['UpdateCredentialsRequest'];
+      try {
+        request = await newCredentials(
+          keys,
+          secrets,
+          newPassword,
+          secretKey,
+          identity.credentialsVersion,
+        );
+      } finally {
+        // No session holds these keys; nothing needs them past sealing and signing the new bundle.
+        secretKey.fill(0);
+        wipeIdentitySecrets(secrets);
+      }
       await body(api.PUT('/identity/credentials', { body: request }));
     },
 
     async recover({ recoveryKeyCode, newPassword, rememberSecretKey }) {
       const { identity, keys, hostUserId } = await currentIdentity();
       const recoveryKey = fromRecoveryKeyCode(recoveryKeyCode);
-      const secrets = opening('wrong_recovery_key', () =>
-        openRecoveryKeyBundle(recoveryKey, keys, fromBase64Url(identity.recoveryKeyBundle)),
-      );
+      let secrets: IdentitySecrets;
+      try {
+        secrets = opening('wrong_recovery_key', () =>
+          openRecoveryKeyBundle(recoveryKey, keys, fromBase64Url(identity.recoveryKeyBundle)),
+        );
+      } finally {
+        recoveryKey.fill(0);
+      }
       requireOwnKeys(keys, secrets, hostUserId);
       const secretKey = randomBytes(16);
-      const request = await newCredentials(
-        keys,
-        secrets,
-        newPassword,
-        secretKey,
-        identity.credentialsVersion,
-      );
-      await body(api.PUT('/identity/credentials', { body: request }));
-      await storage.delete(secretKeyRecord(keys.userId));
-      await remember(keys.userId, secretKey, rememberSecretKey);
+      const secretKeyCode = toSecretKeyCode(secretKey);
+      try {
+        const request = await newCredentials(
+          keys,
+          secrets,
+          newPassword,
+          secretKey,
+          identity.credentialsVersion,
+        );
+        await body(api.PUT('/identity/credentials', { body: request }));
+        await storage.delete(secretKeyRecord(keys.userId));
+        await remember(keys.userId, secretKey, rememberSecretKey);
+      } finally {
+        secretKey.fill(0);
+      }
       return {
-        session: sessionFor(keys, secrets, hostUserId),
-        secretKeyCode: toSecretKeyCode(secretKey),
+        session: await sessionFor(keys, secrets, hostUserId),
+        secretKeyCode,
         recoveryKeyCode,
       };
     },
 
-    async replaceKeys({ recoveryKeyCode, newPassword, rememberSecretKey }) {
+    async prepareKeyReplacement({ recoveryKeyCode, newPassword, rememberSecretKey }) {
       const { identity, keys: current, hostUserId } = await currentIdentity();
       const recoveryKey = fromRecoveryKeyCode(recoveryKeyCode);
       const currentSecrets = opening('wrong_recovery_key', () =>
         openRecoveryKeyBundle(recoveryKey, current, fromBase64Url(identity.recoveryKeyBundle)),
       );
-      requireOwnKeys(current, currentSecrets, hostUserId);
-      const next = await replaceIdentityKeys({
-        current,
-        currentSecrets,
-        currentRecoveryKey: recoveryKey,
-        password: newPassword,
-        passwordHasher,
-      });
-      await body(
-        api.PUT('/identity/keys', {
-          body: {
-            expectedKeyVersion: current.keyVersion,
-            encryptionPublicKey: toBase64Url(next.keys.encryptionPublicKey),
-            signingPublicKey: toBase64Url(next.keys.signingPublicKey),
-            recoverySigningPublicKey: toBase64Url(next.keys.recoverySigningPublicKey),
-            signature: toBase64Url(next.statement.signature),
-            recoverySignature: toBase64Url(next.statement.recoverySignature ?? new Uint8Array()),
-            kdf: toWireKdf(next.kdf),
-            privateKeyBundle: toBase64Url(next.privateKeyBundle),
-            recoveryKeyBundle: toBase64Url(next.recoveryKeyBundle),
-          },
-        }),
-      );
-      await storage.delete(secretKeyRecord(current.userId));
-      await remember(current.userId, next.secretKey, rememberSecretKey);
-      const session = sessionFor(next.keys, next.secrets, hostUserId);
-      const failedVaults: string[] = [];
-      const unrecognizedEntries: Record<string, readonly number[]> = {};
-      for (const vaultId of await allVaultIds()) {
-        try {
-          const recorded = await session.recordKeyReplacement(vaultId);
-          if (recorded.unrecognizedEntries.length > 0) {
-            unrecognizedEntries[vaultId] = recorded.unrecognizedEntries;
-          }
-        } catch {
-          failedVaults.push(vaultId);
-        }
+      let next: Awaited<ReturnType<typeof replaceIdentityKeys>>;
+      try {
+        requireOwnKeys(current, currentSecrets, hostUserId);
+        next = await replaceIdentityKeys({
+          current,
+          currentSecrets,
+          currentRecoveryKey: recoveryKey,
+          password: newPassword,
+          passwordHasher,
+        });
+      } finally {
+        // The new bundle carries the old encryption keys and local state key on; the old
+        // signing seed and recovery key are needed no more.
+        recoveryKey.fill(0);
+        currentSecrets.signingSeed.fill(0);
       }
+      const nextRecoveryKeyCode = toRecoveryKeyCode(next.recoveryKey);
+      next.recoveryKey.fill(0);
       return {
-        session,
         secretKeyCode: toSecretKeyCode(next.secretKey),
-        recoveryKeyCode: toRecoveryKeyCode(next.recoveryKey),
-        failedVaults,
-        unrecognizedEntries,
+        recoveryKeyCode: nextRecoveryKeyCode,
+        complete: completion(
+          next.keys,
+          'identity_version_conflict',
+          async () => {
+            await body(
+              api.PUT('/identity/keys', {
+                body: {
+                  expectedKeyVersion: current.keyVersion,
+                  encryptionPublicKey: toBase64Url(next.keys.encryptionPublicKey),
+                  signingPublicKey: toBase64Url(next.keys.signingPublicKey),
+                  recoverySigningPublicKey: toBase64Url(next.keys.recoverySigningPublicKey),
+                  signature: toBase64Url(next.statement.signature),
+                  recoverySignature: toBase64Url(
+                    next.statement.recoverySignature ?? new Uint8Array(),
+                  ),
+                  kdf: toWireKdf(next.kdf),
+                  privateKeyBundle: toBase64Url(next.privateKeyBundle),
+                  recoveryKeyBundle: toBase64Url(next.recoveryKeyBundle),
+                },
+              }),
+            );
+          },
+          async () => {
+            await storage.delete(secretKeyRecord(current.userId));
+            await remember(current.userId, next.secretKey, rememberSecretKey);
+            const session = await sessionFor(next.keys, next.secrets, hostUserId);
+            const failedVaults: string[] = [];
+            const unrecognizedEntries: Record<string, readonly number[]> = {};
+            const unrecognizedAcceptances: string[] = [];
+            for (const vaultId of await allVaultIds()) {
+              try {
+                const recorded = await session.recordKeyReplacement(vaultId);
+                if (recorded.unrecognizedEntries.length > 0) {
+                  unrecognizedEntries[vaultId] = recorded.unrecognizedEntries;
+                }
+                if (recorded.unrecognizedAcceptance) unrecognizedAcceptances.push(vaultId);
+              } catch {
+                failedVaults.push(vaultId);
+              }
+            }
+            // Kept until now, since a completion that failed may need it again.
+            next.secretKey.fill(0);
+            return { session, failedVaults, unrecognizedEntries, unrecognizedAcceptances };
+          },
+        ),
       };
     },
 

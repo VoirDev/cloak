@@ -56,6 +56,12 @@ export interface KeyReplacementRecord {
    * Review them, and undo unwanted changes with a rotation (`PROTOCOL.md` §5.6, §16).
    */
   readonly unrecognizedEntries: readonly number[];
+  /**
+   * Whether the vault's acceptance was signed with the replaced keys and not by this device, so
+   * this device did not sign it again: the vault vouches for nobody until the user accepts it
+   * again with `acceptVault` (`PROTOCOL.md` §5.6 step 6, §9).
+   */
+  readonly unrecognizedAcceptance: boolean;
 }
 
 /** A vault as the server lists it, before verification. */
@@ -187,7 +193,7 @@ export interface SectionChanges {
   readonly sections: readonly DecryptedSection[];
   /** Sections the host removed in the same range of changes. */
   readonly removed: readonly SectionRemoval[];
-  /** The vault's latest change number; pass it back to read only later changes. */
+  /** The change number the read covers through; pass it back to read only later changes. */
   readonly lastChangeSeq: number;
 }
 
@@ -211,6 +217,6 @@ export interface VaultBatchResult {
 export interface VaultContents {
   /** The latest write of each live section, checked, by change number; refused ones say why. */
   readonly sections: readonly DecryptedSection[];
-  /** The vault's latest change number. */
+  /** The change number the read covers through, the vault's latest when it began or later. */
   readonly lastChangeSeq: number;
 }

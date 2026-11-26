@@ -1,12 +1,14 @@
 import { sha256 } from '@noble/hashes/sha2.js';
 
 import { equalBytes, isAbsent } from './bytes.ts';
-import { checkpointRoot, type CheckpointLeaf } from './checkpoints.ts';
+import { isFlag } from './canonical.ts';
+import { isWellFormedLeaf, rootOfLeafList, type CheckpointLeaf } from './checkpoints.ts';
 import { derivesNode, isValidNodeKey, parseSectionScope } from './nodes.ts';
 import { keysDigest, type PublicKeys } from './publicKeys.ts';
 import { checkSignature, type SignatureRefusal } from './signatures.ts';
 import {
   ROLE_CODE,
+  isWellFormedLogEntry,
   logMessage,
   roleIncludes,
   type LogEntryFields,
@@ -157,6 +159,8 @@ export interface VaultLogState {
 /**
  * Why a log is refused (`PROTOCOL.md` §7.6):
  *
+ * - `malformed`: a field is outside the range of its type in §3, in the entry or in a leaf of its
+ *   checkpoint, so the entry has no canonical message;
  * - `broken_chain`: `seq`, `previousHash`, `entryHash` or the vault id do not continue the log;
  * - `bad_flag`: `requestEnd` is not 0 or 1, as decoded by the caller;
  * - `unverified_keys`: the author's or subject's keys are not the committed or trusted ones;
@@ -168,10 +172,12 @@ export interface VaultLogState {
  * - `not_authorized`: the author's role is too weak;
  * - `missing_checkpoint`: an entry that takes away the right to write carries no checkpoint;
  * - `no_owner`: the vault would be left without an owner;
- * - `bad_checkpoint`: the leaves the reader holds do not give the signed root;
+ * - `bad_checkpoint`: the leaves the reader holds name a section twice or do not give the signed
+ *   root;
  * - `vault_deleted`: an entry follows the vault's deletion.
  */
 export type LogRefusal =
+  | 'malformed'
   | 'broken_chain'
   | 'bad_flag'
   | 'unverified_keys'
@@ -318,6 +324,14 @@ export function replayVaultLog(
   for (const entry of entries) {
     const seq = points.length + 1;
     const fail = (reason: LogRefusal): ReplayResult => ({ ok: false, reason, failSeq: seq });
+
+    // Shape: every field fits its type, or the entry has no message to check (§3).
+    if (!isFlag(entry.requestEnd)) return fail('bad_flag');
+    if (
+      !isWellFormedLogEntry(entry) ||
+      (entry.checkpointLeaves !== undefined && !entry.checkpointLeaves.every(isWellFormedLeaf))
+    )
+      return fail('malformed');
 
     // Chain (rule 1).
     if (entry.vaultId !== vaultId || entry.seq !== seq) return fail('broken_chain');
@@ -570,11 +584,10 @@ export function replayVaultLog(
 
     if (hasCheckpoint) {
       const root = required(entry.checkpoint);
-      if (
-        entry.checkpointLeaves !== undefined &&
-        !equalBytes(checkpointRoot(entry.checkpointLeaves), root)
-      )
-        return fail('bad_checkpoint');
+      // A list that names a section twice has no root a reader accepts (§7.5).
+      const heldRoot =
+        entry.checkpointLeaves === undefined ? root : rootOfLeafList(entry.checkpointLeaves);
+      if (heldRoot === undefined || !equalBytes(heldRoot, root)) return fail('bad_checkpoint');
       checkpoints.push({ seq, root });
     }
 
@@ -615,6 +628,24 @@ export function replayVaultLog(
       placesChangedAt,
     },
   };
+}
+
+/**
+ * Who made a user a member of the vault the last time they joined it: the author of the
+ * `vault_created` or `member_added` entry their current membership started with (`PROTOCOL.md`
+ * §9).
+ *
+ * @param state A verified log.
+ * @param userId The user.
+ * @returns The author, or `undefined` when the user is not a member.
+ */
+export function addedBy(state: VaultLogState, userId: string): string | undefined {
+  const changes = state.history.get(userId) ?? [];
+  if (changes.at(-1)?.membership === undefined) return undefined;
+  let start = changes.length - 1;
+  while (start > 0 && changes[start - 1]?.membership !== undefined) start -= 1;
+  const seq = changes[start]?.seq;
+  return seq === undefined ? undefined : state.points[seq - 1]?.authorUserId;
 }
 
 /**

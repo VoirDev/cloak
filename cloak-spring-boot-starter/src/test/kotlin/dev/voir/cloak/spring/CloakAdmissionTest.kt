@@ -180,15 +180,22 @@ class CloakAdmissionTest {
     }
 
     @Test
-    fun `a suspicious refusal is logged by operation and code, never by who`(output: CapturedOutput) {
+    fun `suspicious refusals and unexpected failures are logged by operation, never by who or what`(output: CapturedOutput) {
         val mallory = TestClient()
         val forged = CloakApi.registration(mallory) + ("signature" to b64(TestBlobs.blob(65)))
+        val failing = TestClient(dev.voir.cloak.server.identity.domain.HostUserId.of("failing-${Uuid.random()}"))
+        val vault = Uuid.random()
 
         assertEquals("bad_signature", api.call(POST, "/identity", mallory, forged).code)
+        val failure = api.call(GET, "/vaults/$vault", failing)
 
         assertTrue("Cloak refused registerIdentity: bad_signature" in output.out, output.out)
-        assertFalse(mallory.hostUserId.value in output.all)
-        assertFalse(mallory.id.value.toString() in output.all)
+        assertEquals("internal_error", failure.code)
+        val traceId = failure["traceId"].asString()
+        assertTrue("Cloak request GET /cloak/v1/vaults/{vaultId} (getVault) failed [traceId=$traceId]" in output.all, output.all)
+        for (id in listOf(mallory.hostUserId.value, mallory.id.value.toString(), failing.hostUserId.value, failing.id.value.toString(), vault.toString())) {
+            assertFalse(id in output.all, id)
+        }
     }
 
     @Test
@@ -235,13 +242,17 @@ class CloakAdmissionTest {
             "authorKeyVersion" to Int.MAX_VALUE, "signature" to b64(TestBlobs.blob(65)),
         )
 
-    /** A guard that refuses callers whose host id starts with `limited-`, and records what it is asked. */
+    /**
+     * A guard that refuses callers whose host id starts with `limited-`, fails unexpectedly for those
+     * whose host id starts with `failing-`, and records what it is asked.
+     */
     class RecordingGuard : CloakRequestGuard {
         /** What the guard was asked. */
         val calls: MutableList<Pair<String, String>> = Collections.synchronizedList(mutableListOf())
 
         override fun check(principal: String, operationId: String): Duration? {
             calls += principal to operationId
+            check(!principal.startsWith("failing-")) { "The guard broke." }
             return if (principal.startsWith("limited-")) Duration.ofMillis(1_500) else null
         }
     }

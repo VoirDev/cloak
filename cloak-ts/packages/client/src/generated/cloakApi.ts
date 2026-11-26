@@ -65,8 +65,10 @@ export interface paths {
          *     logs that name them (`PROTOCOL.md` §5.7). The body is signed with the caller's current
          *     signing key, so the host's session alone cannot delete an account, and expires at
          *     `notAfter`, at most 10 minutes ahead, so a captured one cannot be sent again later.
-         *     Refused with `409 identity_in_vaults` while the caller is a member of a vault that is not
-         *     deleted. Afterwards every request of the caller answers `410 identity_deleted`.
+         *     Refused with `409 identity_in_vaults` while the caller is an accepted member of a vault that
+         *     is not deleted and has another member who is not deleted. The caller's vaults that would be
+         *     left with deleted members only go with the identity. Afterwards every request of the
+         *     caller answers `410 identity_deleted`.
          */
         post: operations["deleteIdentity"];
         delete?: never;
@@ -243,13 +245,14 @@ export interface paths {
          * Pause section writes to vaults for a checkpoint
          * @description Pauses section writes to every vault named, all or none, for `Meta.limits.writePauseSeconds`
          *     (`PROTOCOL.md` §7.5), so a request carrying a checkpoint cannot be outrun by writes. Needs
-         *     an editor or stronger in each vault. An admin's pause replaces anyone else's; an editor may
-         *     pause a vault at most once per `Meta.limits.writePauseIntervalSeconds` (`429 rate_limited`)
-         *     and only where nobody else's pause holds it (`409 pause_held`). Asking again renews the
-         *     caller's own pause. A
-         *     pause ends when a request of the caller carrying a checkpoint for the vault is applied,
-         *     when it is released, or when it runs out. It is the server's help only: clients never
-         *     depend on it for what they accept.
+         *     an editor or stronger in each vault. An admin's pause replaces anyone else's; a member who
+         *     is not an admin may pause a vault at most once per `Meta.limits.writePauseIntervalSeconds`,
+         *     renewals included (`429 rate_limited`), and only where nobody else's pause holds it
+         *     (`409 pause_held`, with `Retry-After` until that pause ends). Asking again renews the
+         *     caller's own pause. While a pause holds, every section write to the vault answers
+         *     `503 busy` with a `Retry-After` of at most 2 seconds. A pause ends when a request of the
+         *     caller carrying a checkpoint for the vault is applied, when it is released, or when it runs
+         *     out. It is the server's help only: clients never depend on it for what they accept.
          */
         post: operations["pauseWrites"];
         delete?: never;
@@ -374,9 +377,11 @@ export interface paths {
         get?: never;
         /**
          * Accept a vault one was added to
-         * @description Marks the caller's membership accepted (`PROTOCOL.md` §12.4). Until then the vault is
-         *     listed only with `pending=true` and the host does not count the caller for access checks.
-         *     Unsigned, the server's help against being added unasked; the log alone decides rights.
+         * @description Marks the caller's membership accepted (`PROTOCOL.md` §12.4) with the `vaultAcceptance`
+         *     they signed with their current keys (§9), which the vault's view then carries. Until then
+         *     the vault is listed only with `pending=true` and the host does not count the caller for
+         *     access checks. Accepting again with a newer key version replaces the signature. The log
+         *     alone decides what a member may read and write.
          */
         put: operations["acceptVault"];
         post?: never;
@@ -397,7 +402,10 @@ export interface paths {
         put?: never;
         /**
          * Accept everything from one person
-         * @description Accepts every vault the named user added the caller to, and every one they add later.
+         * @description Accepts every vault the named user added the caller to, and every one they add later, with
+         *     the `inviterAcceptance` the caller signed with their current keys (`PROTOCOL.md` §9). The
+         *     views of those vaults carry it. Accepting again with a newer key version replaces the
+         *     signature. Answers `404 not_found` unless the person is registered and not deleted.
          */
         post: operations["acceptInviter"];
         delete?: never;
@@ -483,7 +491,9 @@ export interface paths {
          * Prove what checkpoints hold for some sections
          * @description For each item, what the checkpoint carried by log entry `checkpointSeq` holds for the
          *     section: its leaf with the RFC 6962 audit path, or the two neighbouring leaves with theirs to
-         *     show it is absent (`PROTOCOL.md` §7.5). Items may name different checkpoints of the vault.
+         *     show it is absent (`PROTOCOL.md` §7.5). Items may name different checkpoints of the vault,
+         *     whose sizes may add up to at most `maxSectionsPerVault` leaves; a batch naming more answers
+         *     `400 validation_failed`, rule `max_checkpoint_leaves` on `/items`.
          */
         post: operations["batchGetCheckpointProofs"];
         delete?: never;
@@ -636,7 +646,9 @@ export interface paths {
          *     number of that write, and the sections the host removed (`removed`). A page covers every
          *     change after `afterChange` up to `throughChangeSeq`; pass that back as `afterChange` to
          *     receive only what changed since, until it equals `lastChangeSeq`. A client keeps a replica
-         *     up to date this way.
+         *     up to date this way. A page holds at most `limit` sections and `maxPageBytes` bytes of
+         *     ciphertext, always at least one section; a page cut short by either ends at its last
+         *     write's change number.
          */
         get: operations["listVaultSections"];
         put?: never;
@@ -751,7 +763,10 @@ export interface paths {
         };
         /**
          * Read a node
-         * @description The latest write of each of the node's sections in vaults the caller belongs to.
+         * @description The latest write of each of the node's sections in vaults the caller belongs to, ordered by
+         *     vault and then section name, one page at a time: at most `maxPageSize` sections and
+         *     `maxPageBytes` bytes of ciphertext, always at least one section. Pass `nextCursor` back as
+         *     `cursor` until a page has none. A cursor of another node answers `400 validation_failed`.
          */
         get: operations["getNode"];
         put?: never;
@@ -771,7 +786,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Read several nodes */
+        /**
+         * Read several nodes
+         * @description The readable sections of up to `maxBatchSize` distinct nodes, sharing one page's budget
+         *     (see the `200` response).
+         */
         post: operations["batchGetNodes"];
         delete?: never;
         options?: never;
@@ -897,12 +916,14 @@ export interface components {
             maxRequestBytes: number;
             /**
              * Format: int32
-             * @description Maximum items per batch call and envelopes per rotation.
+             * @description Maximum items per batch call, such as sections per batch write or vaults per batch
+             *     rotation. A rotation's envelopes are bounded by `maxMembersPerVault` instead.
              * @example 100
              */
             maxBatchSize: number;
             /**
              * Format: int32
+             * @description Largest page, and most sections one response with ciphertext holds.
              * @example 100
              */
             maxPageSize: number;
@@ -912,6 +933,14 @@ export interface components {
              * @example 1000
              */
             maxIndexPageSize: number;
+            /**
+             * Format: int32
+             * @description Most bytes of section ciphertext one response carries (the section feed, node reads).
+             *     A response holds whole sections, always at least one, so it is never below
+             *     `maxSectionBytes`.
+             * @example 8388608
+             */
+            maxPageBytes: number;
             /**
              * Format: int32
              * @description Maximum members of one vault, so a rotation fits in one request. Adding one more answers
@@ -936,16 +965,25 @@ export interface components {
             maxStoredSectionsPerVault: number;
             /**
              * Format: int32
-             * @description How long a write pause holds a vault.
+             * @description How long a write pause holds a vault, unless it ends sooner.
              * @example 30
              */
             writePauseSeconds: number;
             /**
              * Format: int32
-             * @description Least time between two pauses of one vault by the same editor.
+             * @description Least time between two pauses of one vault by the same member who is not an admin,
+             *     renewals included.
              * @example 300
              */
             writePauseIntervalSeconds: number;
+            /**
+             * Format: int32
+             * @description Most key versions of one identity, so the chain of key statements a reader verifies
+             *     stays bounded. A key replacement past it answers `400 validation_failed`, rule
+             *     `max_key_versions`.
+             * @example 100
+             */
+            maxKeyVersions: number;
             /** @description Argon2id bounds; clients refuse parameters outside them (`PROTOCOL.md` §5.3). */
             kdf: {
                 /**
@@ -1075,8 +1113,28 @@ export interface components {
             /** @description Signed `node_created` entries by the caller, each with `requestEnd` true, in `seq` order. */
             log: components["schemas"]["LogEntryInput"][];
         };
+        /** @description An acceptance signed with the caller's current identity keys (`PROTOCOL.md` §9). */
+        Acceptance: {
+            /** @description The caller's current identity key version, whose signing key signed it. */
+            keyVersion: components["schemas"]["IdentityKeyVersion"];
+            signature: components["schemas"]["SignatureBlob"];
+        };
         AcceptInviterRequest: {
             inviterUserId: components["schemas"]["Uuid"];
+            /** @description The caller's current identity key version, whose signing key signed it. */
+            keyVersion: components["schemas"]["IdentityKeyVersion"];
+            /** @description The caller's `inviterAcceptance` of the person (`PROTOCOL.md` §9). */
+            signature: components["schemas"]["SignatureBlob"];
+        };
+        /**
+         * @description The caller's signed acceptance of a vault (`PROTOCOL.md` §9): its `vaultAcceptance`, or,
+         *     with `inviterUserId`, the `inviterAcceptance` of the person who added them. A client checks
+         *     the signature and, for an inviter, that the verified log names them as who added the caller.
+         */
+        VaultAcceptance: {
+            inviterUserId?: components["schemas"]["Uuid"];
+            keyVersion: components["schemas"]["IdentityKeyVersion"];
+            signature: components["schemas"]["SignatureBlob"];
         };
         /** @description The application's key for a node, 1 to 255 bytes of UTF-8 (`PROTOCOL.md` §8.1). */
         NodeKey: string;
@@ -1137,8 +1195,10 @@ export interface components {
          */
         Vault: {
             id: components["schemas"]["Uuid"];
-            /** @description Whether the caller accepted the vault; unsigned, the server's help (`PROTOCOL.md` §12.4). */
+            /** @description Whether the server lists the vault as accepted by the caller (`PROTOCOL.md` §12.4). */
             accepted: boolean;
+            /** @description The caller's signed acceptance; absent while they have not accepted. */
+            acceptance?: components["schemas"]["VaultAcceptance"];
             /** @description Who added the caller, from the log; absent for the vault's creator. */
             addedByUserId?: components["schemas"]["Uuid"];
             /** @description Whether the log ends in `vault_deleted`; the content is gone and only the log remains. */
@@ -1160,6 +1220,8 @@ export interface components {
             keyEnvelope: components["schemas"]["Blob"];
             /** @description The signed `vault_created` entry. */
             log: components["schemas"]["LogEntryInput"];
+            /** @description The creator's `vaultAcceptance` of the new vault, signed with the keys that sign the entry. */
+            acceptance: components["schemas"]["Acceptance"];
         };
         VaultKey: {
             version: components["schemas"]["VaultKeyVersion"];
@@ -1450,16 +1512,24 @@ export interface components {
             /** @description The requested sections without a latest write the caller can read, in request order. */
             missing: components["schemas"]["SectionRef"][];
         };
-        NodeSections: {
+        NodeSections: components["schemas"]["PageInfo"] & {
             nodeId: components["schemas"]["Uuid"];
+            /** @description This page of the node's sections, by vault and then section name. */
             sections: components["schemas"]["SectionWrite"][];
         };
         BatchGetNodesRequest: {
             nodeIds: components["schemas"]["Uuid"][];
         };
         BatchGetNodesResponse: {
+            /**
+             * @description The nodes with a readable section on this page, in request order; one whose sections
+             *     did not all fit carries `nextCursor` for `getNode`.
+             */
             items: components["schemas"]["NodeSections"][];
+            /** @description The requested nodes without a readable section, in request order. */
             missingNodeIds: components["schemas"]["Uuid"][];
+            /** @description The requested nodes this page's budget did not reach, in request order; ask again. */
+            unreadNodeIds: components["schemas"]["Uuid"][];
         };
         PageInfo: {
             /** @description Cursor of the next page; absent on the last page. */
@@ -1491,12 +1561,12 @@ export interface components {
          *     | `recipients_mismatch` | 409 | A rotation must reseal to exactly the remaining members |
          *     | `credentials_version_conflict` | 409 | Credentials changed on another device; see `currentVersion` |
          *     | `identity_version_conflict` | 409 | Keys were replaced on another device; see `currentVersion` |
-         *     | `identity_in_vaults` | 409 | Delete or leave every vault before deleting the identity |
+         *     | `identity_in_vaults` | 409 | Delete or leave every accepted vault with other members who are not deleted first |
          *     | `pause_held` | 409 | Someone else's write pause holds the vault |
          *     | `too_many_invitations` | 409 | The person has too many vaults they have not accepted |
          *     | `identity_deleted` | 410 | The caller, or the user the request names, is deleted |
          *     | `payload_too_large` | 413 | Body or section larger than the limit |
-         *     | `rate_limited` | 429 | The host's request guard refused; see `Retry-After` |
+         *     | `rate_limited` | 429 | The host's request guard refused, or a write pause was asked again too soon; see `Retry-After` |
          *     | `busy` | 503 | The vault is busy, paused for a checkpoint, or the request ran out of time; see `Retry-After` |
          *     | `internal_error` | 500 | Unexpected failure; see `traceId` |
          * @enum {string}
@@ -1632,9 +1702,13 @@ export interface components {
                 "application/problem+json": components["schemas"]["Problem"];
             };
         };
-        /** @description The request conflicts with the current state. */
+        /**
+         * @description The request conflicts with the current state. A `pause_held` conflict carries
+         *     `Retry-After`: when the pause the caller asked for again ends.
+         */
         Conflict: {
             headers: {
+                "Retry-After": components["headers"]["RetryAfter"];
                 [name: string]: unknown;
             };
             content: {
@@ -1688,7 +1762,11 @@ export interface components {
                 "application/problem+json": components["schemas"]["Problem"];
             };
         };
-        /** @description The host's request guard refused the request; retry after `Retry-After`. */
+        /**
+         * @description The host's request guard refused the request, or a member who is not an admin paused a
+         *     vault's writes again within `Meta.limits.writePauseIntervalSeconds`; retry after
+         *     `Retry-After`. Nothing was applied.
+         */
         TooManyRequests: {
             headers: {
                 "Retry-After": components["headers"]["RetryAfter"];
@@ -1707,8 +1785,8 @@ export interface components {
             };
         };
         /**
-         * @description The vault is busy with another change, or the request ran out of database time; retry
-         *     after `Retry-After`. Nothing was applied.
+         * @description The vault is busy with another change, its section writes are paused for a checkpoint, or
+         *     the request ran out of database time; retry after `Retry-After`. Nothing was applied.
          */
         ServiceUnavailable: {
             headers: {
@@ -1747,7 +1825,7 @@ export interface components {
         };
     };
     parameters: {
-        /** @description Host user id. */
+        /** @description Cloak user id, the UUID derived from the host user id (`PROTOCOL.md` §5.0). */
         UserId: components["schemas"]["Uuid"];
         /** @description Vault id. */
         VaultId: components["schemas"]["Uuid"];
@@ -1955,7 +2033,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description Host user id. */
+                /** @description Cloak user id, the UUID derived from the host user id (`PROTOCOL.md` §5.0). */
                 userId: components["parameters"]["UserId"];
             };
             cookie?: never;
@@ -2359,7 +2437,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Acceptance"];
+            };
+        };
         responses: {
             /** @description Accepted. */
             204: {
@@ -2598,7 +2680,7 @@ export interface operations {
             path: {
                 /** @description Vault id. */
                 vaultId: components["parameters"]["VaultId"];
-                /** @description Host user id. */
+                /** @description Cloak user id, the UUID derived from the host user id (`PROTOCOL.md` §5.0). */
                 userId: components["parameters"]["UserId"];
             };
             cookie?: never;
@@ -2637,7 +2719,7 @@ export interface operations {
             path: {
                 /** @description Vault id. */
                 vaultId: components["parameters"]["VaultId"];
-                /** @description Host user id. */
+                /** @description Cloak user id, the UUID derived from the host user id (`PROTOCOL.md` §5.0). */
                 userId: components["parameters"]["UserId"];
             };
             cookie?: never;
@@ -2985,7 +3067,10 @@ export interface operations {
     };
     getNode: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description `nextCursor` from the previous page. Omitted for the first page. */
+                cursor?: components["parameters"]["Cursor"];
+            };
             header?: never;
             path: {
                 /** @description Node id. */
@@ -2995,7 +3080,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The node's readable sections. */
+            /** @description One page of the node's readable sections. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -3004,6 +3089,7 @@ export interface operations {
                     "application/json": components["schemas"]["NodeSections"];
                 };
             };
+            400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
             410: components["responses"]["Gone"];
@@ -3025,7 +3111,13 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The readable sections of each node found. */
+            /**
+             * @description The readable sections of each node found. The nodes share one page's budget, at most
+             *     `maxPageSize` sections and `maxPageBytes` bytes of ciphertext, filled node by node in
+             *     node id order: a node whose sections do not all fit carries `nextCursor` to read on
+             *     with `getNode`, and nodes the budget did not reach are listed in `unreadNodeIds` to ask
+             *     for again.
+             */
             200: {
                 headers: {
                     [name: string]: unknown;

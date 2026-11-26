@@ -155,4 +155,13 @@ describe('canonical encoding', () => {
     expect(() => new Canonical().key32(new Uint8Array(31))).toThrow(RangeError);
     expect(() => new Canonical().str('x'.repeat(65_536))).toThrow(RangeError);
   });
+
+  it('refuses strings with a lone surrogate, which UTF-8 cannot encode', () => {
+    expect(() => new Canonical().str('x\uD800')).toThrow(RangeError);
+    expect(() => new Canonical().str('\uDC00x')).toThrow(RangeError);
+    expect(() => new Canonical().str('x\uDC00\uD800')).toThrow(RangeError);
+    // U+FFFD itself, and a pair, are well-formed.
+    expect(toHex(new Canonical().str('x\uFFFD').build())).toBe('000478efbfbd');
+    expect(toHex(new Canonical().str('\uD83D\uDE00').build())).toBe('0004f09f9880');
+  });
 });

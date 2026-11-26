@@ -7,6 +7,7 @@ import dev.voir.cloak.server.identity.DatabaseKeyDirectory
 import dev.voir.cloak.server.identity.domain.UserId
 import dev.voir.cloak.server.meta.Limits
 import dev.voir.cloak.server.protocol.BlobRules
+import dev.voir.cloak.server.protocol.Canonical
 import dev.voir.cloak.server.protocol.LogFields
 import dev.voir.cloak.server.protocol.LogRules
 import dev.voir.cloak.server.protocol.LogState
@@ -154,7 +155,7 @@ internal class LogAppender(
         request.checkpointLeaves?.let { leaves ->
             val entry = request.entries.single { !isAbsent(it.input.checkpoint) }.input
             CheckpointRepository.store(vaultId, entry.seq, leaves)
-            val stored = checkNotNull(CheckpointRepository.leaves(vaultId, listOf(entry.seq))[entry.seq])
+            val stored = CheckpointRepository.leaves(vaultId, entry.seq)
             if (stored.size != leaves.size || Merkle.root(stored) != entry.checkpoint) {
                 logger.error("A stored checkpoint does not read back as signed; the request is rolled back")
                 error("The stored checkpoint does not read back as signed")
@@ -203,7 +204,7 @@ internal class LogAppender(
         return leaves
     }
 
-    /** Checks the sizes of an entry's binary fields. */
+    /** Checks the shape of an entry's fields: sizes, values the encoding reads as absent, well-formed strings. */
     private fun checkShape(input: LogEntryInput, pointer: String) {
         BlobRules.signature(input.signature, "$pointer/signature")
         BlobRules.optionalKey(input.subjectKeys, "$pointer/subjectKeys")
@@ -218,14 +219,19 @@ internal class LogAppender(
         Validation.require(input.seq >= 1, "$pointer/seq", "minimum", "Must be at least 1.")
         Validation.require(input.keyVersion >= 1, "$pointer/keyVersion", "minimum", "Must be at least 1.")
         Validation.require(input.authorKeyVersion >= 1, "$pointer/authorKeyVersion", "minimum", "Must be at least 1.")
-        // Absent node fields are the nil UUID and the empty string in the signed message (§7.1):
+        // Absent ids are the nil UUID and absent strings empty in the signed message (§3, §7.1):
         // refuse those values, so what is stored is exactly what was signed.
+        Validation.require(input.subjectUserId?.value != Uuid.NIL, "$pointer/subjectUserId", "absent", "Omit it rather than send the nil UUID.")
         Validation.require(input.nodeId?.value != Uuid.NIL, "$pointer/nodeId", "absent", "Omit it rather than send the nil UUID.")
         Validation.require(input.homeVaultId?.value != Uuid.NIL, "$pointer/homeVaultId", "absent", "Omit it rather than send the nil UUID.")
         Validation.require(input.nodeKey != "", "$pointer/nodeKey", "absent", "Omit it rather than send it empty.")
         Validation.require(input.sections != "", "$pointer/sections", "absent", "Omit it rather than send it empty.")
         Validation.require((input.nodeKey?.length ?: 0) <= NodeKey.MAX_BYTES, "$pointer/nodeKey", "maxLength", "At most 255 bytes.")
         Validation.require((input.sections?.length ?: 0) <= MAX_SECTIONS_FIELD, "$pointer/sections", "maxLength", "Too long.")
+        // A lone surrogate has no UTF-8 encoding, so the entry would have no signed message (§3).
+        for ((name, value) in listOf("nodeKey" to input.nodeKey, "sections" to input.sections)) {
+            Validation.require(value == null || Canonical.isWellFormed(value), "$pointer/$name", "format", "Must be well-formed Unicode.")
+        }
     }
 
     /** Maps a broken rule to the API's error. */

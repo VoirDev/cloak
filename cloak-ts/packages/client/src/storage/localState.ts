@@ -15,12 +15,29 @@ import { CloakSessionClosedError } from '../CloakSessionClosedError.ts';
 import type { CloakStorage } from './CloakStorage.ts';
 import { decodeSnapshot, encodeSnapshot, snapshotRecord } from './snapshotCodec.ts';
 
-/** The key version of a person this device trusts first, and its digest. */
-export interface Pin {
-  /** Pinned key version. */
+/** A key version of a person, and its digest. */
+export interface KeyVersionRef {
+  /** Key version. */
   readonly keyVersion: number;
   /** Its `keysDigest`. */
   readonly keysDigest: Uint8Array;
+}
+
+/** The key version of a person this device trusts first (`PROTOCOL.md` §9). */
+export interface Pin extends KeyVersionRef {
+  /**
+   * Whether the pin is vouched for: the user confirmed the person's fingerprint, or a vault the
+   * user accepted commits their keys. Only then may the user add them to a vault.
+   */
+  readonly vouched: boolean;
+}
+
+/** What this device signed an acceptance of (`PROTOCOL.md` §15), to sign it again later. */
+export interface OwnAcceptances {
+  /** Vaults accepted one by one, or created. */
+  readonly vaultIds: readonly string[];
+  /** People whose every vault the user accepted. */
+  readonly inviterUserIds: readonly string[];
 }
 
 /** The last entry of a vault log this device verified. */
@@ -76,11 +93,26 @@ export interface LocalState {
   /** Pins a person at a key version. */
   setPin(userId: string, pin: Pin): Promise<void>;
 
+  /** Marks a person's pin vouched for, if it is still the pin of [keysDigest]. */
+  vouch(userId: string, keysDigest: Uint8Array): Promise<void>;
+
   /** Returns the newest key version of a person this device verified a statement for. */
-  newest(userId: string): Promise<Pin | undefined>;
+  newest(userId: string): Promise<KeyVersionRef | undefined>;
 
   /** Remembers a person's newest verified key version, unless a newer one is kept. */
-  raiseNewest(userId: string, newest: Pin): Promise<void>;
+  raiseNewest(userId: string, newest: KeyVersionRef): Promise<void>;
+
+  /** Whether this device last found a vault vouching, having vouched for its members then. */
+  vouching(vaultId: string): Promise<boolean>;
+
+  /** Remembers whether a vault vouches (`PROTOCOL.md` §9). */
+  setVouching(vaultId: string, vouching: boolean): Promise<void>;
+
+  /** Returns the acceptances this device signed. */
+  ownAcceptances(): Promise<OwnAcceptances>;
+
+  /** Remembers an acceptance this device signed, of a vault or of an inviter. */
+  addOwnAcceptance(kind: 'vault' | 'inviter', id: string): Promise<void>;
 
   /** Returns a person's host user id this device checked derives their id (`PROTOCOL.md` §5.0). */
   hostId(userId: string): Promise<string | undefined>;
@@ -153,8 +185,23 @@ export interface LocalState {
   close(): void;
 }
 
+/** Stored form of a key version reference. */
+const keyVersionRecord = z.object({
+  keyVersion: z.number().int().positive(),
+  keysDigest: z.string(),
+});
+
 /** Stored form of a pin. */
-const pinRecord = z.object({ keyVersion: z.number().int().positive(), keysDigest: z.string() });
+const pinRecord = keyVersionRecord.extend({ vouched: z.boolean() });
+
+/** Stored form of whether a vault vouches. */
+const vouchingRecord = z.object({ vouching: z.boolean() });
+
+/** Stored form of the acceptances this device signed. */
+const ownAcceptancesRecord = z.object({
+  vaultIds: z.array(z.string()),
+  inviterUserIds: z.array(z.string()),
+});
 
 /** Stored form of a log head. */
 const headRecord = z.object({ seq: z.number().int().positive(), entryHash: z.string() });
@@ -200,13 +247,74 @@ export function userRecords(userId: string): string {
 }
 
 /**
- * Opens a signed-in user's local state.
+ * Key of the record that tells a user's records were all sealed under the current
+ * `localStateKey`; it is itself sealed under that key, and empty.
+ */
+function movedRecord(userId: string): string {
+  return `${userRecords(userId)}moved`;
+}
+
+/**
+ * Seals every record of a user under the current `localStateKey`, the first time the user unlocks
+ * with a bundle that carries a `previousLocalStateKey` (`PROTOCOL.md` §5.4, §12.2): each record
+ * still sealed under the previous key is opened with it and sealed again. A record of the moved
+ * state is written last, so a move cut short is finished on the next unlock, and once it is there
+ * the previous key opens nothing ({@link openLocalState} never takes it). The secret key, kept as
+ * is outside the local state key, is left alone.
  *
  * @param storage Where records live.
  * @param userId Signed-in user.
  * @param localStateKey `localStateKey` from the user's bundle.
- * @param previousLocalStateKey The previous version's key, when the bundle carries one: records
- *   still sealed under it are opened and sealed again under the current key.
+ * @param previousLocalStateKey The previous version's key, from the same bundle.
+ * @throws {CloakCryptoError} `decryption_failed` when a record opens under neither key, because
+ *   it was changed or written by someone else; clearing the user's `cloak/v1/<userId>/` records
+ *   recovers.
+ */
+export async function moveLocalState(
+  storage: CloakStorage,
+  userId: string,
+  localStateKey: Uint8Array,
+  previousLocalStateKey: Uint8Array,
+): Promise<void> {
+  const key = deriveLocalRecordKey(localStateKey, userId);
+  const previous = deriveLocalRecordKey(previousLocalStateKey, userId);
+  try {
+    const marker = movedRecord(userId);
+    const moved = await storage.get(marker);
+    if (moved !== undefined && opens(key, marker, moved)) return;
+    for (const name of await storage.keys(userRecords(userId))) {
+      if (name === marker || name === secretKeyRecord(userId)) continue;
+      const blob = await storage.get(name);
+      if (blob === undefined || opens(key, name, blob)) continue;
+      const plaintext = openLocalRecord(previous, name, blob);
+      await storage.set(name, sealLocalRecord(key, name, plaintext));
+      plaintext.fill(0);
+    }
+    await storage.set(marker, sealLocalRecord(key, marker, new Uint8Array()));
+  } finally {
+    key.fill(0);
+    previous.fill(0);
+  }
+}
+
+/** Whether a record opens under [key]; any failure but a failed tag stays as it is. */
+function opens(key: Uint8Array, name: string, blob: Uint8Array): boolean {
+  try {
+    openLocalRecord(key, name, blob).fill(0);
+    return true;
+  } catch (error: unknown) {
+    if (isCloakCryptoError(error) && error.code === 'decryption_failed') return false;
+    throw error;
+  }
+}
+
+/**
+ * Opens a signed-in user's local state, under the current `localStateKey` alone; after a key
+ * replacement, {@link moveLocalState} first moves the records sealed under the previous one.
+ *
+ * @param storage Where records live.
+ * @param userId Signed-in user.
+ * @param localStateKey `localStateKey` from the user's bundle.
  * @returns The state.
  * @throws {CloakCryptoError} `decryption_failed` from any read, when a stored record was changed
  *   or written by someone else; clearing the user's `cloak/v1/<userId>/` records recovers.
@@ -215,35 +323,17 @@ export function openLocalState(
   storage: CloakStorage,
   userId: string,
   localStateKey: Uint8Array,
-  previousLocalStateKey?: Uint8Array,
 ): LocalState {
   const key = deriveLocalRecordKey(localStateKey, userId);
-  const previous =
-    previousLocalStateKey === undefined
-      ? undefined
-      : deriveLocalRecordKey(previousLocalStateKey, userId);
   const prefix = userRecords(userId).slice(0, -1);
 
   /** Whether {@link LocalState.close} wiped the keys. */
   let closed = false;
 
-  /** Opens a blob under the current key, or the previous one; reports which. */
-  function open(
-    name: string,
-    blob: Uint8Array,
-  ): { readonly plaintext: Uint8Array; readonly stale: boolean } {
+  /** Opens a blob under the key. */
+  function open(name: string, blob: Uint8Array): Uint8Array {
     if (closed) throw new CloakSessionClosedError();
-    try {
-      return { plaintext: openLocalRecord(key, name, blob), stale: false };
-    } catch (error: unknown) {
-      if (
-        previous === undefined ||
-        !isCloakCryptoError(error) ||
-        error.code !== 'decryption_failed'
-      )
-        throw error;
-      return { plaintext: openLocalRecord(previous, name, blob), stale: true };
-    }
+    return openLocalRecord(key, name, blob);
   }
 
   /** Parses an opened record. */
@@ -260,37 +350,25 @@ export function openLocalState(
     return sealLocalRecord(key, name, new TextEncoder().encode(JSON.stringify(value)));
   }
 
-  /** Reads a record, sealing it again under the current key when it was under the previous one. */
+  /** Reads a record. */
   async function read<T>(name: string, schema: z.ZodType<T>): Promise<T | undefined> {
     const blob = await storage.get(name);
-    if (blob === undefined) return undefined;
-    const { plaintext, stale } = open(name, blob);
-    const value = parse(plaintext, schema);
-    if (stale) await storage.set(name, seal(name, value));
-    return value;
+    return blob === undefined ? undefined : parse(open(name, blob), schema);
   }
 
   /**
    * Replaces a record with [next] unless [keep] says the stored one wins, atomically when the
    * store supports it.
    */
-  async function raise<T>(
+  function raise<T>(
     name: string,
     schema: z.ZodType<T>,
     next: T,
     keep: (stored: T) => boolean,
   ): Promise<void> {
-    const merge = (current: Uint8Array | undefined): Uint8Array | undefined => {
-      const stored =
-        current === undefined ? undefined : parse(open(name, current).plaintext, schema);
-      return stored !== undefined && keep(stored) ? undefined : seal(name, next);
-    };
-    if (storage.update === undefined) {
-      const sealed = merge(await storage.get(name));
-      if (sealed !== undefined) await storage.set(name, sealed);
-    } else {
-      await storage.update(name, merge);
-    }
+    return modify(name, schema, (stored) =>
+      stored !== undefined && keep(stored) ? undefined : next,
+    );
   }
 
   /** Prefix of a vault's records; ids are UUIDs, so prefixes of two vaults never overlap. */
@@ -308,22 +386,56 @@ export function openLocalState(
     return `${prefix}/people/${userId}/${kind}`;
   }
 
+  /** Replaces a record with what [change] makes of the stored one, atomically when supported. */
+  async function modify<T>(
+    name: string,
+    schema: z.ZodType<T>,
+    change: (stored: T | undefined) => T | undefined,
+  ): Promise<void> {
+    const merge = (current: Uint8Array | undefined): Uint8Array | undefined => {
+      const next = change(current === undefined ? undefined : parse(open(name, current), schema));
+      return next === undefined ? undefined : seal(name, next);
+    };
+    if (storage.update === undefined) {
+      const sealed = merge(await storage.get(name));
+      if (sealed !== undefined) await storage.set(name, sealed);
+    } else {
+      await storage.update(name, merge);
+    }
+  }
+
   return {
     async pin(userId) {
       const stored = await read(personName('pin', userId), pinRecord);
       return stored === undefined
         ? undefined
-        : { keyVersion: stored.keyVersion, keysDigest: fromBase64Url(stored.keysDigest) };
+        : {
+            keyVersion: stored.keyVersion,
+            keysDigest: fromBase64Url(stored.keysDigest),
+            vouched: stored.vouched,
+          };
     },
     setPin(userId, pin) {
       const name = personName('pin', userId);
       return storage.set(
         name,
-        seal(name, { keyVersion: pin.keyVersion, keysDigest: toBase64Url(pin.keysDigest) }),
+        seal(name, {
+          keyVersion: pin.keyVersion,
+          keysDigest: toBase64Url(pin.keysDigest),
+          vouched: pin.vouched,
+        }),
+      );
+    },
+    vouch(userId, keysDigest) {
+      const digest = toBase64Url(keysDigest);
+      return modify(personName('pin', userId), pinRecord, (stored) =>
+        stored === undefined || stored.vouched || stored.keysDigest !== digest
+          ? undefined
+          : { ...stored, vouched: true },
       );
     },
     async newest(userId) {
-      const stored = await read(personName('newest', userId), pinRecord);
+      const stored = await read(personName('newest', userId), keyVersionRecord);
       return stored === undefined
         ? undefined
         : { keyVersion: stored.keyVersion, keysDigest: fromBase64Url(stored.keysDigest) };
@@ -331,10 +443,35 @@ export function openLocalState(
     raiseNewest(userId, newest) {
       return raise(
         personName('newest', userId),
-        pinRecord,
+        keyVersionRecord,
         { keyVersion: newest.keyVersion, keysDigest: toBase64Url(newest.keysDigest) },
         (stored) => stored.keyVersion >= newest.keyVersion,
       );
+    },
+    async vouching(vaultId) {
+      return (await read(`${vaultPrefix(vaultId)}vouching`, vouchingRecord))?.vouching ?? false;
+    },
+    setVouching(vaultId, vouching) {
+      const name = `${vaultPrefix(vaultId)}vouching`;
+      return storage.set(name, seal(name, { vouching }));
+    },
+    async ownAcceptances() {
+      return (
+        (await read(`${prefix}/own-acceptances`, ownAcceptancesRecord)) ?? {
+          vaultIds: [],
+          inviterUserIds: [],
+        }
+      );
+    },
+    addOwnAcceptance(kind, id) {
+      return modify(`${prefix}/own-acceptances`, ownAcceptancesRecord, (stored) => {
+        const current = stored ?? { vaultIds: [], inviterUserIds: [] };
+        const list = kind === 'vault' ? current.vaultIds : current.inviterUserIds;
+        if (list.includes(id)) return undefined;
+        return kind === 'vault'
+          ? { ...current, vaultIds: [...current.vaultIds, id] }
+          : { ...current, inviterUserIds: [...current.inviterUserIds, id] };
+      });
     },
     async hostId(userId) {
       return (await read(personName('host-id', userId), hostIdRecord))?.hostUserId;
@@ -397,9 +534,7 @@ export function openLocalState(
       const added = entryHashes.map(toBase64Url);
       const merge = (current: Uint8Array | undefined): Uint8Array => {
         const stored =
-          current === undefined
-            ? []
-            : parse(open(name, current).plaintext, ownEntriesRecord).entryHashes;
+          current === undefined ? [] : parse(open(name, current), ownEntriesRecord).entryHashes;
         return seal(name, { entryHashes: [...new Set([...stored, ...added])] });
       };
       if (storage.update === undefined) await storage.set(name, merge(await storage.get(name)));
@@ -428,6 +563,7 @@ export function openLocalState(
       await storage.deletePrefix(`${vault}cache/`);
       await storage.delete(`${vault}snapshot`);
       await storage.delete(`${vault}own-entries`);
+      await storage.delete(`${vault}vouching`);
     },
     clear() {
       return storage.deletePrefix(`${prefix}/`);
@@ -435,7 +571,6 @@ export function openLocalState(
     close() {
       closed = true;
       key.fill(0);
-      previous?.fill(0);
     },
   };
 }

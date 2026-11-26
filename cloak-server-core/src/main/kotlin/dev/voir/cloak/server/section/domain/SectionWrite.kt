@@ -250,29 +250,39 @@ public data class SectionHeaderPage(
 )
 
 /**
- * The sections of a node the caller can read, across vaults.
+ * One page of the sections of a node the caller can read, across vaults, by vault and then
+ * section name. A page holds whole sections, at least one, within [dev.voir.cloak.server.meta.Limits.MAX_PAGE_BYTES]
+ * of ciphertext.
  *
  * @property nodeId The node.
- * @property sections Latest writes of its readable sections.
+ * @property sections Latest writes of its readable sections on this page.
+ * @property nextCursor Cursor of the node's next page, or `null` when its sections all came.
  */
 public data class NodeSections(
     /** The node. */
     public val nodeId: NodeId,
-    /** Latest writes of its readable sections. */
+    /** Latest writes of its readable sections on this page. */
     public val sections: List<SectionWrite>,
+    /** Cursor of the node's next page, or `null`. */
+    public val nextCursor: String?,
 )
 
 /**
- * Result of reading several nodes.
+ * Result of reading several nodes, which share one page's budget.
  *
- * @property items Nodes with at least one readable section.
- * @property missingNodeIds Requested nodes without one.
+ * @property items Nodes with a readable section on this page, in request order; one whose
+ *   sections did not all fit carries a cursor to read on with the single node read.
+ * @property missingNodeIds Requested nodes without a readable section, in request order.
+ * @property unreadNodeIds Requested nodes the page's budget did not reach, in request order; read
+ *   them again.
  */
 public data class NodeSectionsBatch(
-    /** Nodes with a readable section. */
+    /** Nodes with a readable section on this page. */
     public val items: List<NodeSections>,
     /** Requested nodes without one. */
     public val missingNodeIds: List<NodeId>,
+    /** Requested nodes the budget did not reach. */
+    public val unreadNodeIds: List<NodeId>,
 )
 
 /**

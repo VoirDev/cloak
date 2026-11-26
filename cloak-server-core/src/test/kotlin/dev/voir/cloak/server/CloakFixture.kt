@@ -180,8 +180,18 @@ internal class CloakFixture(settings: CloakSettings = CloakSettings.defaults()) 
     /** Creates a vault owned by [owner]. */
     fun createVault(owner: TestClient, id: VaultId = VaultId(Uuid.random())): VaultId {
         val log = entry(owner, id, LogEntryKind.VAULT_CREATED, subject = owner, role = Role.OWNER, keyVersion = 1, keyCommitment = TestBlobs.random(32), seq = 1)
-        server.vaults.create(owner.id, CreateVaultCommand(id, TestBlobs.envelope(), log))
+        server.vaults.create(owner.id, CreateVaultCommand(id, TestBlobs.envelope(), log, owner.vaultAcceptance(id)))
         return id
+    }
+
+    /** [user] accepts a vault they were added to, signing its `vaultAcceptance`. */
+    fun accept(user: TestClient, vaultId: VaultId) {
+        server.members.accept(user.id, vaultId, user.vaultAcceptance(vaultId))
+    }
+
+    /** [user] accepts every vault [inviter] adds them to, signing an `inviterAcceptance`. */
+    fun acceptInviter(user: TestClient, inviter: TestClient) {
+        server.members.acceptInviter(user.id, inviter.id, user.inviterAcceptance(inviter.id))
     }
 
     /** Adds [user] to a vault as [role], signed by [admin]. */
@@ -317,7 +327,8 @@ internal class CloakFixture(settings: CloakSettings = CloakSettings.defaults()) 
     }
 
     /**
-     * Writes a section as [writer], reading the head and the latest write first.
+     * Writes a section as [writer], reading the head and the latest write first, with a ciphertext
+     * of [blocks] padding blocks.
      *
      * @return The stored write.
      */
@@ -328,7 +339,9 @@ internal class CloakFixture(settings: CloakSettings = CloakSettings.defaults()) 
         name: String,
         deleted: Boolean = false,
         nodeType: String = "compute.vps",
-    ): SectionWrite = server.sections.write(writer.id, SectionRef(vaultId, nodeId, SectionName(name)), writeInput(writer, vaultId, nodeId, name, deleted, nodeType))
+        blocks: Int = 1,
+    ): SectionWrite =
+        server.sections.write(writer.id, SectionRef(vaultId, nodeId, SectionName(name)), writeInput(writer, vaultId, nodeId, name, deleted, nodeType, blocks))
 
     /**
      * Creates [count] new sections named [name] on fresh nodes, as [writer], in batches of 100
@@ -379,11 +392,12 @@ internal class CloakFixture(settings: CloakSettings = CloakSettings.defaults()) 
         name: String,
         deleted: Boolean = false,
         nodeType: String = "compute.vps",
+        blocks: Int = 1,
     ): SectionWriteInput {
         val head = vault(writer, vaultId)
         val ref = SectionRef(vaultId, nodeId, SectionName(name))
         val latest = runCatching { server.sections.get(writer.id, ref) }.getOrNull()
-        val ciphertext = if (deleted) null else TestBlobs.ciphertext()
+        val ciphertext = if (deleted) null else TestBlobs.ciphertext(blocks)
         val origin = originOf(nodeId)
         val fields = SectionWriteFields(
             vaultId = vaultId,

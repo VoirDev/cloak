@@ -3,6 +3,7 @@ package dev.voir.cloak.spring
 import dev.voir.cloak.server.identity.domain.KdfParams
 import dev.voir.cloak.server.section.domain.SectionWriteInput
 import dev.voir.cloak.server.testing.TestClient
+import dev.voir.cloak.server.vault.domain.Acceptance
 import dev.voir.cloak.server.vault.domain.LogEntryInput
 import dev.voir.cloak.spring.testhost.CloakTestApplication
 import kotlinx.io.bytestring.ByteString
@@ -17,10 +18,14 @@ import kotlin.io.encoding.Base64
 /**
  * Calls the starter through MockMvc like an HTTP client would, and checks every response
  * against the OpenAPI contract before returning it.
+ *
+ * @property servletPath Path the host maps its dispatcher servlet to (`spring.mvc.servlet.path`),
+ * or empty for the root.
  */
 class CloakApi(
     private val mvc: MockMvc,
     private val mapper: JsonMapper,
+    private val servletPath: String = "",
 ) {
     /**
      * A response.
@@ -39,7 +44,7 @@ class CloakApi(
 
     /** Sends one request; [path] is relative to `/cloak/v1` and may carry a query. */
     fun call(method: HttpMethod, path: String, user: TestClient? = null, body: Any? = null): Response {
-        val request = MockMvcRequestBuilders.request(method, "/cloak/v1$path")
+        val request = MockMvcRequestBuilders.request(method, "$servletPath/cloak/v1$path").servletPath(servletPath)
         user?.let { request.header(CloakTestApplication.USER_HEADER, it.hostUserId.value) }
         body?.let { request.contentType(MediaType.APPLICATION_JSON).content(if (it is String) it else mapper.writeValueAsString(it)) }
         val result = mvc.perform(request).andReturn().response
@@ -91,6 +96,9 @@ class CloakApi(
                     "recoveryKeyBundle" to b64(it.recoveryKeyBundle),
                 )
             }
+
+        fun acceptance(acceptance: Acceptance): Map<String, Any> =
+            mapOf("keyVersion" to acceptance.keyVersion, "signature" to b64(acceptance.signature))
 
         fun log(entry: LogEntryInput): Map<String, Any> =
             buildMap {

@@ -32,8 +32,9 @@ Each user has an identity (§5.1):
   key replacements (§5.5).
 
 Every key version is vouched for by a signed key statement, so a client follows a person's keys
-from the version it first saw (§5.2). The first time a device meets someone it pins their keys;
-adding someone new needs their **fingerprint**, compared in person or by QR code (§9).
+from the version it first saw (§5.2). The first time a device verifies an entry or a write by or
+about someone it pins their keys; adding someone needs their **fingerprint**, compared in person or
+by QR code, unless a vault the user accepted vouches for them (§9).
 
 ## Vaults
 
@@ -60,7 +61,8 @@ clients show that a rotation is due.
 Vaults are independent: there is no nesting, no inheritance and no access without an account. A
 person an admin adds is a member at once by the log, but the vault is **pending** for them until
 they accept it, or everything from the person who added them (§12.4); only then is it listed for
-them and counted by the host's access checks.
+them and counted by the host's access checks. Acceptances are signed, and a vault the user accepted
+vouches for the keys of the people in it: they can be added elsewhere without a fingerprint (§9).
 
 ## Nodes and sections
 
@@ -97,10 +99,10 @@ came since, and sends; writers meanwhile get `busy` and retry.
 
 ## Key replacement
 
-When identity keys may have leaked, the user makes new ones with the recovery key, which signs
-them (§5.6). The replacement is recorded in every vault as a log entry with a checkpoint; from
-then on, the old keys have no rights there. What the old keys signed earlier stays valid, and the
-client lists entries it did not make for the user to review.
+When identity keys may have leaked, the user makes new ones with the recovery key, which signs them
+(§5.6). The replacement is recorded in every vault as a log entry, with a checkpoint where the user
+may write; from then on, the old keys have no rights there. What the old keys signed earlier stays
+valid, and the client lists entries it did not make for the user to review.
 
 ## What a device remembers
 
@@ -118,13 +120,14 @@ only makes the device trust as a new device would; it cannot forge them.
 ## Deleting
 
 - **An account** is deleted by the user, with a signed request valid for a few minutes, once they
-  belong to no vault they accepted (§5.7). The host can also erase a user from its own code. The
-  identity becomes a tombstone and its id never registers again. Deletion does not revoke keys:
-  for leaked keys, replace them.
+  belong to no vault they accepted that has another member who is not deleted (§5.7): the client
+  first deletes the vaults where the user is the only member and leaves the others. The host can
+  also erase a user from its own code. The identity becomes a tombstone and its id never registers
+  again. Deletion does not revoke keys: for leaked keys, replace them.
 - **A vault** is deleted by an owner with a signed `vault_deleted`, the last entry of its log
   (§12.3). Its content goes; its log stays, so members verify who deleted it.
 - **A node's sections** are removed by the host when it deletes the record, in the vaults the user
-  administers (`nodes.purge`). This is unsigned, like any loss of availability.
+  accepted and administers (`nodes.purge`). This is unsigned, like any loss of availability.
 
 Cloak has no backup of its own. Never restore its schema to an older point: clients see that as a
 rollback. The data's owners keep their own copies, since they read it in plaintext.
