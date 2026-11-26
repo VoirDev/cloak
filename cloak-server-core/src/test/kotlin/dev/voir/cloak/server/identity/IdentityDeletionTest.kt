@@ -4,8 +4,10 @@ import dev.voir.cloak.server.CloakFixture
 import dev.voir.cloak.server.assertCloakError
 import dev.voir.cloak.server.error.CloakErrorCode
 import dev.voir.cloak.server.error.CloakException
+import dev.voir.cloak.server.race
 import dev.voir.cloak.server.testing.TestBlobs
 import dev.voir.cloak.server.testing.TestClient
+import dev.voir.cloak.server.vault.domain.CreateVaultCommand
 import dev.voir.cloak.server.vault.domain.DeliverEnvelopeCommand
 import dev.voir.cloak.server.vault.domain.LogEntryKind
 import dev.voir.cloak.server.vault.domain.Role
@@ -19,6 +21,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlin.uuid.Uuid
 
 /** Deleting identities (`PROTOCOL.md` §5.7), by the user and by the host. */
 class IdentityDeletionTest {
@@ -30,7 +33,7 @@ class IdentityDeletionTest {
         val bob = cloak.user()
         val vault = cloak.createVault(alice)
         cloak.addMember(alice, vault, bob, Role.VIEWER)
-        cloak.server.members.accept(bob.id, vault)
+        cloak.accept(bob, vault)
 
         assertCloakError(CloakErrorCode.IDENTITY_IN_VAULTS) { cloak.deleteIdentity(bob) }
         cloak.leave(bob, vault, withCheckpoint = false)
@@ -206,6 +209,91 @@ class IdentityDeletionTest {
         cloak.server.identity.erase(alice.hostUserId)
 
         assertCloakError(CloakErrorCode.IDENTITY_DELETED) { cloak.addMember(bob, vault, alice, Role.VIEWER) }
+    }
+
+    @Test
+    fun `an erasure racing the user's new vault never leaves that vault behind`() {
+        repeat(10) {
+            val alice = cloak.user()
+            val vault = VaultId(Uuid.random())
+            val log = cloak.entry(alice, vault, LogEntryKind.VAULT_CREATED, subject = alice, role = Role.OWNER, keyVersion = 1, keyCommitment = TestBlobs.random(32), seq = 1)
+            val command = CreateVaultCommand(vault, TestBlobs.envelope(), log, alice.vaultAcceptance(vault))
+
+            val outcomes = race(listOf({ cloak.server.vaults.create(alice.id, command) }, { cloak.server.identity.erase(alice.hostUserId) }))
+
+            // Either the vault came first and went with its only member, or the erasure came first.
+            assertTrue(outcomes == listOf(null, null) || outcomes == listOf(CloakErrorCode.IDENTITY_DELETED, null), "$outcomes")
+            assertEquals(0L, cloak.number("select count(*) from cloak.vaults where id = '${vault.value}'"))
+        }
+    }
+
+    @Test
+    fun `a vault left with only deleted members goes with the identity that leaves it so`() {
+        val mallory = cloak.user()
+        val ursula = cloak.user()
+        val vault = cloak.createVault(mallory)
+        cloak.addMember(mallory, vault, ursula, Role.OWNER)
+        cloak.leave(mallory, vault, withCheckpoint = true)
+
+        cloak.deleteIdentity(ursula)
+
+        assertEquals(0L, cloak.number("select count(*) from cloak.vaults where id = '${vault.value}'"))
+    }
+
+    @Test
+    fun `a vault whose other members are all deleted holds no deletion up and goes with it`() {
+        val alice = cloak.user()
+        val bob = cloak.user()
+        val carol = cloak.user()
+        val shared = cloak.createVault(alice)
+        cloak.addMember(alice, shared, bob, Role.EDITOR)
+        cloak.addMember(alice, shared, carol, Role.VIEWER)
+        cloak.accept(bob, shared)
+        val own = cloak.createVault(bob)
+        cloak.server.identity.erase(alice.hostUserId)
+        cloak.deleteIdentity(carol)
+
+        cloak.deleteIdentity(bob)
+
+        assertEquals(0L, cloak.number("select count(*) from cloak.vaults where id in ('${shared.value}', '${own.value}')"))
+    }
+
+    @Test
+    fun `erasing a deleted user again removes the vaults only deleted members are left in`() {
+        val mallory = cloak.user()
+        val ursula = cloak.user()
+        val vault = cloak.createVault(mallory)
+        cloak.addMember(mallory, vault, ursula, Role.OWNER)
+        cloak.deleteIdentity(ursula)
+        cloak.leave(mallory, vault, withCheckpoint = true)
+
+        assertFalse(cloak.server.identity.erase(ursula.hostUserId))
+
+        assertEquals(0L, cloak.number("select count(*) from cloak.vaults where id = '${vault.value}'"))
+    }
+
+    @Test
+    fun `deleting or erasing an identity removes its acceptances of people, theirs of it, and its pause records`() {
+        val alice = cloak.user()
+        val bob = cloak.user()
+        val carol = cloak.user()
+        val dave = cloak.user()
+        val vault = cloak.createVault(alice)
+        cloak.addMember(alice, vault, bob, Role.EDITOR)
+        cloak.server.members.pauseWrites(bob.id, listOf(vault))
+        cloak.acceptInviter(bob, carol)
+        cloak.acceptInviter(carol, bob)
+        cloak.acceptInviter(alice, bob)
+        cloak.acceptInviter(carol, alice)
+        cloak.acceptInviter(alice, carol)
+        cloak.acceptInviter(alice, dave)
+
+        cloak.deleteIdentity(bob)
+        cloak.server.identity.erase(carol.hostUserId)
+
+        assertEquals(1L, cloak.number("select count(*) from cloak.accepted_inviters"))
+        assertEquals(1L, cloak.number("select count(*) from cloak.accepted_inviters where user_id = '${alice.id.value}' and inviter_user_id = '${dave.id.value}'"))
+        assertEquals(0L, cloak.number("select count(*) from cloak.write_pause_requests where user_id = '${bob.id.value}'"))
     }
 
     @Test

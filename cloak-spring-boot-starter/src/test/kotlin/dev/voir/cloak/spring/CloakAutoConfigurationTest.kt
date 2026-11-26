@@ -6,6 +6,7 @@ import dev.voir.cloak.spring.auth.CloakPrincipalResolver
 import org.springframework.boot.autoconfigure.AutoConfigurations
 import org.springframework.boot.test.context.FilteredClassLoader
 import org.springframework.boot.test.context.runner.WebApplicationContextRunner
+import org.springframework.boot.webmvc.autoconfigure.DispatcherServletAutoConfiguration
 import javax.sql.DataSource
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -17,7 +18,7 @@ import kotlin.test.assertTrue
 /** What the auto-configuration requires from the host and what it offers in return. */
 class CloakAutoConfigurationTest {
     private val runner = WebApplicationContextRunner()
-        .withConfiguration(AutoConfigurations.of(CloakAutoConfiguration::class.java))
+        .withConfiguration(AutoConfigurations.of(DispatcherServletAutoConfiguration::class.java, CloakAutoConfiguration::class.java))
         .withBean(DataSource::class.java, { TestPostgres.freshDataSource() })
 
     @Test

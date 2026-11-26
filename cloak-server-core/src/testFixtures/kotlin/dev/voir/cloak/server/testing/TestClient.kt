@@ -9,6 +9,8 @@ import dev.voir.cloak.server.identity.domain.UserId
 import dev.voir.cloak.server.protocol.LogFields
 import dev.voir.cloak.server.protocol.Messages
 import dev.voir.cloak.server.protocol.SectionWriteFields
+import dev.voir.cloak.server.vault.domain.Acceptance
+import dev.voir.cloak.server.vault.domain.VaultId
 import kotlinx.io.bytestring.ByteString
 import java.security.KeyPair
 import java.security.KeyPairGenerator
@@ -108,6 +110,24 @@ public class TestClient(
     internal fun signWrite(fields: SectionWriteFields): ByteString = sign(Messages.sectionWrite(fields))
 
     /**
+     * Signs this user's `vaultAcceptance` of a vault with the current key version (`PROTOCOL.md` §9).
+     *
+     * @param vaultId The vault to accept.
+     * @return The acceptance, for creating or accepting the vault.
+     */
+    public fun vaultAcceptance(vaultId: VaultId): Acceptance =
+        Acceptance(keys.keyVersion, sign(Messages.vaultAcceptance(id, keys.keyVersion, vaultId)))
+
+    /**
+     * Signs this user's `inviterAcceptance` of a person with the current key version (`PROTOCOL.md` §9).
+     *
+     * @param inviterUserId The person whose every vault this user accepts.
+     * @return The acceptance.
+     */
+    public fun inviterAcceptance(inviterUserId: UserId): Acceptance =
+        Acceptance(keys.keyVersion, sign(Messages.inviterAcceptance(id, keys.keyVersion, inviterUserId)))
+
+    /**
      * Signs with the previous version's signing key, as a thief of replaced keys would.
      *
      * @param message Canonical message.
@@ -148,7 +168,10 @@ public class TestClient(
         }
     }
 
-    /** Public keys of one version; the encryption key is random, since the server never uses it. */
+    /**
+     * Public keys of one version, with a real X25519 encryption key: the server never seals to it,
+     * but refuses one nothing could be sealed to (`PROTOCOL.md` §5.1).
+     */
     private fun publicKeys(version: Int, signingPair: KeyPair, recoveryPair: KeyPair): PublicKeys =
-        PublicKeys(id, version, 1, TestBlobs.random(32), raw(signingPair), raw(recoveryPair))
+        PublicKeys(id, version, 1, raw(KeyPairGenerator.getInstance("X25519").generateKeyPair()), raw(signingPair), raw(recoveryPair))
 }

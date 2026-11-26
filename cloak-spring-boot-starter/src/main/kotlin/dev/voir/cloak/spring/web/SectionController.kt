@@ -105,8 +105,8 @@ internal class SectionController(
     /** `GET /nodes/{nodeId}`. */
     @GetMapping("/nodes/{nodeId}")
     @CloakOperation("getNode")
-    fun node(request: HttpServletRequest, @PathVariable nodeId: String): NodeSections =
-        cloak.nodes.get(callers.require(request), Params.node(nodeId)).toApi()
+    fun node(request: HttpServletRequest, @PathVariable nodeId: String, @RequestParam(required = false) cursor: String?): NodeSections =
+        cloak.nodes.get(callers.require(request), Params.node(nodeId), cursor).toApi()
 
     /** `POST /nodes/batch-get`. */
     @PostMapping("/nodes/batch-get")

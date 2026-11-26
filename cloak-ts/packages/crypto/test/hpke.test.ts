@@ -1,7 +1,15 @@
 import { describe, expect, it } from 'vitest';
 
 import { openBlob, sealBlob } from '../src/hpke.ts';
-import { ENVELOPE_BYTES, isCloakCryptoError, openEnvelope, sealEnvelope } from '../src/index.ts';
+import {
+  ENVELOPE_BYTES,
+  checkEncryptionKey,
+  isCloakCryptoError,
+  openEnvelope,
+  sealEnvelope,
+  signKeyStatement,
+  verifyKeyStatement,
+} from '../src/index.ts';
 import { identityNamed } from './fixtures.ts';
 import { hex, objects, text, toHex, vectors } from './vectors.ts';
 
@@ -66,5 +74,30 @@ describe('envelopes', () => {
       }
       expect(code).toBe(text(vector, 'reason'));
     }
+  });
+});
+
+describe('encryption keys', () => {
+  const IDENTITY = vectors('identity.json');
+
+  it.each(
+    objects(IDENTITY, 'encryptionKeys').map((vector) => [text(vector, 'key'), vector] as const),
+  )('checks %s as the vectors do', async (_, vector) => {
+    const key = hex(vector, 'key');
+    const reason = vector['reason'];
+    expect(checkEncryptionKey(key)).toBe(reason === null ? undefined : reason);
+    if (reason !== null) {
+      // Nothing is sealed to a refused key, and the failure is a Cloak one.
+      const sealing = sealBlob(key, new Uint8Array(1), new Uint8Array(1), new Uint8Array(1));
+      await expect(sealing).rejects.toSatisfy(isCloakCryptoError);
+    }
+  });
+
+  it('refuses a key statement whose encryption key is of small order', () => {
+    const owner = identityNamed('owner-v1');
+    const keys = { ...owner.keys, encryptionPublicKey: new Uint8Array(32) };
+    const statement = signKeyStatement(keys, owner.signingSeed);
+    expect(verifyKeyStatement(statement)).toBe(false);
+    expect(verifyKeyStatement(signKeyStatement(owner.keys, owner.signingSeed))).toBe(true);
   });
 });

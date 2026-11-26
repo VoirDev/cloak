@@ -9,6 +9,8 @@ import dev.voir.cloak.server.meta.Limits
 import dev.voir.cloak.server.identity.persistence.IdentityRepository
 import dev.voir.cloak.server.persistence.CloakContext
 import dev.voir.cloak.server.protocol.BlobRules
+import dev.voir.cloak.server.protocol.Messages
+import dev.voir.cloak.server.vault.domain.Acceptance
 import dev.voir.cloak.server.vault.domain.AddMemberCommand
 import dev.voir.cloak.server.vault.domain.DeliverEnvelopeCommand
 import dev.voir.cloak.server.vault.domain.LeaveVaultCommand
@@ -35,8 +37,9 @@ import kotlin.time.toKotlinDuration
  * Who belongs to a vault: adding members, roles, envelopes, leaving, rotation and key
  * replacements (`/vaults/{vaultId}/members`, `departures`, `rotations`, `key-replacements`).
  *
- * Every operation locks the vault's row first, verifies its signed entries against the vault's
- * state with the same rules every member's client applies, and stores them in one transaction.
+ * Every operation locks the vault's row right after its caller's identity row, verifies its signed
+ * entries against the vault's state with the same rules every member's client applies, and stores
+ * them in one transaction.
  *
  * @property context Database and clock.
  */
@@ -65,9 +68,11 @@ public class MemberOperations internal constructor(
         )
         asCaller(caller) {
             val view = VaultAccess.lockForMember(caller, vaultId)
+            // Additions of this user to any vault wait for each other from here, so the pending
+            // counts below cannot be overshot by parallel requests; nor can an erasure commit.
+            IdentityRepository.lockForInvitation(command.userId)
             val keys = DatabaseKeyDirectory()
             keys.currentVersion(command.userId) ?: throw CloakException.identityRequired("The user")
-            // The directory holds a shared lock on the user's row, so an erasure cannot commit after this.
             if (IdentityRepository.isDeleted(command.userId, lock = false)) throw CloakException.identityDeleted("The user")
             if (command.userId in view.members) throw CloakException(CloakErrorCode.ALREADY_EXISTS, "The user is already a member.")
             Validation.require(
@@ -81,7 +86,8 @@ public class MemberOperations internal constructor(
             val request = appender.verify(LogAppender.stateOf(view.vault, view.members), caller, listOf(log), emptyList(), "/log")
             val membership = checkNotNull(request.after.members[command.userId])
             // Acceptance is the server's help against being added unasked (§12.4): the person sees the
-            // vault once they accept it, or at once when they accept everything from the caller.
+            // vault once they accept it, or at once when they accept everything from the caller, and
+            // the vault's view then carries that signed acceptance of the caller (§9).
             val accepted = MemberRepository.acceptsFrom(command.userId, caller)
             if (!accepted && MemberRepository.pendingCount(command.userId) >= context.settings.maxPendingInvitations) {
                 throw CloakException(
@@ -407,32 +413,53 @@ public class MemberOperations internal constructor(
     }
 
     /**
-     * Accepts a vault the caller was added to (`PROTOCOL.md` §12.4): it is listed for them and the
-     * host counts them for its access checks. Unsigned, the server's help; the log alone decides
-     * what a member may read and write.
+     * Accepts a vault the caller was added to (`PROTOCOL.md` §12.4) with their signed
+     * `vaultAcceptance` (§9): it is listed for them, the host counts them for its access checks,
+     * and the vault's view carries the acceptance. Accepting again, such as with a new key version
+     * after a key replacement, replaces it. The log alone decides what a member may read and write.
      *
      * @param caller Authenticated user.
      * @param vaultId The vault.
-     * @throws CloakException `not_found` unless the caller is a member of a vault not deleted.
+     * @param acceptance The `vaultAcceptance` signed with the caller's current key version.
+     * @throws CloakException `not_found` unless the caller is a member of a vault not deleted,
+     *   `identity_version_conflict` when it is signed with another key version than the current
+     *   one, `bad_signature` at `/signature`.
      */
-    public fun accept(caller: UserId, vaultId: VaultId) {
+    public fun accept(caller: UserId, vaultId: VaultId, acceptance: Acceptance) {
         context.operation("acceptVault") {
+            AcceptanceRules.checkShape(acceptance, "")
             asCaller(caller) {
                 VaultAccess.readAsMember(caller, vaultId)
-                MemberRepository.accept(vaultId, caller)
+                val current = IdentityRepository.find(caller)?.keys ?: throw CloakException.identityRequired()
+                AcceptanceRules.verify(current, acceptance, { Messages.vaultAcceptance(caller, it, vaultId) }, "")
+                MemberRepository.accept(vaultId, caller, acceptance)
             }
         }
     }
 
     /**
-     * Accepts every vault one person added the caller to, and every one they add later.
+     * Accepts every vault one person added the caller to, and every one they add later, with the
+     * caller's signed `inviterAcceptance` (`PROTOCOL.md` §9, §12.4), which the views of those vaults
+     * carry. Accepting again, such as with a new key version after a key replacement, replaces it.
      *
      * @param caller Authenticated user.
      * @param inviterUserId The person whose vaults the caller accepts.
+     * @param acceptance The `inviterAcceptance` signed with the caller's current key version.
+     * @throws CloakException `not_found` unless the person is registered and not deleted,
+     *   `identity_version_conflict` when it is signed with another key version than the current
+     *   one, `bad_signature` at `/signature`.
      */
-    public fun acceptInviter(caller: UserId, inviterUserId: UserId) {
+    public fun acceptInviter(caller: UserId, inviterUserId: UserId, acceptance: Acceptance) {
         context.operation("acceptInviter") {
-            asCaller(caller) { MemberRepository.acceptFrom(caller, inviterUserId, context.clock.now()) }
+            AcceptanceRules.checkShape(acceptance, "")
+            asCaller(caller) {
+                // Locked in key-share mode: the person's deletion, which removes every acceptance of
+                // them, waits for this one.
+                if (!IdentityRepository.isLive(inviterUserId)) throw CloakException.notFound("user")
+                val current = IdentityRepository.find(caller)?.keys ?: throw CloakException.identityRequired()
+                AcceptanceRules.verify(current, acceptance, { Messages.inviterAcceptance(caller, it, inviterUserId) }, "")
+                MemberRepository.acceptFrom(caller, inviterUserId, acceptance, context.clock.now())
+            }
         }
     }
 

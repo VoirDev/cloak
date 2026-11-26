@@ -61,7 +61,8 @@ class CloakSchemaConstraintsTest {
             connection.run(vault(OTHER_VAULT, "pause_user_id" to "'$ALICE'", "pause_by_admin" to "true", "pause_until" to NOW))
             connection.run(pauseRequest(VAULT, BOB))
             connection.run(removal(VAULT, 6, "section_name" to "'other'"))
-            connection.run(insert("accepted_inviters", mapOf("user_id" to "'$BOB'", "inviter_user_id" to "'$ALICE'", "accepted_at" to NOW), emptyArray()))
+            connection.run(acceptedInviter(BOB, ALICE))
+            connection.run(member(OTHER_VAULT_LOG, ALICE, "key_envelope" to "null", "envelope_key_version" to "null", "acceptance_key_version" to "1", "acceptance_signature" to bytes(65)))
             connection.run(node(VAULT, "node_id" to "'$OTHER_NODE'"))
             connection.run(shareName(VAULT, "billing"))
             connection.run(log(VAULT, 4, "kind" to "'node_created'", "subject_user_id" to "null", "role" to "null", "subject_keys" to "null", "subject_key_version" to "null", "node_id" to "'$NODE'", "node_key" to "'server-1'"))
@@ -117,6 +118,9 @@ class CloakSchemaConstraintsTest {
         "ck_vault_members__role" to member(VAULT, BOB, "role" to "'guest'"),
         "ck_vault_members__keys_digest_length" to member(VAULT, BOB, "keys_digest" to bytes(31)),
         "ck_vault_members__envelope_complete" to member(VAULT, BOB, "envelope_key_version" to "null"),
+        "ck_vault_members__acceptance_complete" to member(VAULT, BOB, "acceptance_key_version" to "1"),
+        "ck_vault_members__acceptance_complete" to member(VAULT, BOB, "acceptance_signature" to bytes(65)),
+        "ck_vault_members__acceptance_complete" to member(VAULT, BOB, "acceptance_key_version" to "1", "acceptance_signature" to bytes(64)),
         "pk_vault_log" to log(VAULT, 1),
         "fk_vault_log__vault_id__vaults" to log(OTHER_VAULT, 1),
         "fk_vault_log__author_user_id_author_key_version__identity_keys" to log(VAULT, 2, *ROLE_SET, "author_key_version" to "9"),
@@ -174,7 +178,10 @@ class CloakSchemaConstraintsTest {
         "pk_node_share_names" to shareName(VAULT, "general"),
         "fk_node_share_names__vault_id_node_id__node_shares" to shareName(VAULT, "general", "node_id" to "'$OTHER_NODE'"),
         "ck_node_share_names__section_name_format" to shareName(VAULT, "Bad"),
-        "pk_accepted_inviters" to insert("accepted_inviters", mapOf("user_id" to "'$ALICE'", "inviter_user_id" to "'$BOB'", "accepted_at" to NOW), emptyArray()).let { "$it; $it" },
+        "pk_accepted_inviters" to acceptedInviter(ALICE, BOB).let { "$it; $it" },
+        "ck_accepted_inviters__signature_length" to acceptedInviter(ALICE, BOB, "signature" to bytes(64)),
+        "fk_accepted_inviters__user_id__identities" to acceptedInviter(CAROL, ALICE),
+        "fk_accepted_inviters__inviter_user_id__identities" to acceptedInviter(ALICE, CAROL),
         "ck_vault_log__node_fields" to log(VAULT, 2, *ROLE_SET, "node_id" to "'$NODE'"),
         "ck_vault_log__node_fields" to log(VAULT, 2, "kind" to "'node_created'", "subject_user_id" to "null", "role" to "null", "subject_keys" to "null", "subject_key_version" to "null", "node_id" to "'$NODE'"),
     ).map { (constraint, statement) ->
@@ -194,6 +201,23 @@ class CloakSchemaConstraintsTest {
                 val count = connection.createStatement().use { it.executeQuery("select count(*) from cloak.$table").apply { next() }.getInt(1) }
                 assertEquals(0, count, table)
             }
+        }
+    }
+
+    @Test
+    fun `deleting an identity row deletes its acceptances of people and theirs of it`() {
+        inTransaction { connection ->
+            connection.run(identity(CAROL))
+            connection.run(acceptedInviter(CAROL, ALICE))
+            connection.run(acceptedInviter(ALICE, CAROL))
+            connection.run(acceptedInviter(BOB, ALICE))
+            connection.run("delete from cloak.identities where user_id = '$CAROL'")
+            val left = connection.createStatement().use {
+                it.executeQuery("select user_id, inviter_user_id from cloak.accepted_inviters").let { rows ->
+                    buildList { while (rows.next()) add(rows.getString(1) to rows.getString(2)) }
+                }
+            }
+            assertEquals(listOf(BOB to ALICE), left)
         }
     }
 
@@ -310,6 +334,12 @@ class CloakSchemaConstraintsTest {
                 "vault_id" to "'$vault'", "user_id" to "'$user'", "role" to "'owner'", "user_key_version" to "1",
                 "keys_digest" to bytes(32), "key_envelope" to bytes(81), "envelope_key_version" to "1", "accepted" to "true", "added_at" to NOW,
             ),
+            changes,
+        )
+
+        fun acceptedInviter(user: String, inviter: String, vararg changes: Pair<String, String>) = insert(
+            "accepted_inviters",
+            mapOf("user_id" to "'$user'", "inviter_user_id" to "'$inviter'", "key_version" to "1", "signature" to bytes(65), "accepted_at" to NOW),
             changes,
         )
 

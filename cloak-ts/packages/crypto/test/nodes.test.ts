@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
   credentialsMessage,
+  inviterAcceptanceMessage,
+  vaultAcceptanceMessage,
   formatSectionScope,
   identityDeletionMessage,
   nodeIdOf,
@@ -77,6 +79,35 @@ describe('identity statements', () => {
     const other = message.slice();
     other[other.length - 1] = (other[other.length - 1] ?? 0) ^ 1;
     expect(verifyIdentityStatement(other, signature, owner.keys.signingPublicKey)).toBe(false);
+  });
+
+  it('builds and verifies signed acceptances as the vectors do', () => {
+    const acceptances = child(IDENTITY, 'acceptances');
+    const acceptor = child(acceptances, 'signer');
+    const userId = text(acceptor, 'userId');
+    const keyVersion = num(acceptor, 'keyVersion');
+    const vault = child(acceptances, 'vault');
+    const inviter = child(acceptances, 'inviter');
+    const vaultMessage = vaultAcceptanceMessage(userId, keyVersion, text(vault, 'vaultId'));
+    const inviterMessage = inviterAcceptanceMessage(
+      userId,
+      keyVersion,
+      text(inviter, 'inviterUserId'),
+    );
+    expect(toHex(vaultMessage)).toBe(text(vault, 'message'));
+    expect(toHex(inviterMessage)).toBe(text(inviter, 'message'));
+    if (owner === undefined) throw new Error('No signer');
+    const key = owner.keys.signingPublicKey;
+    expect(verifyIdentityStatement(vaultMessage, fromHex(text(vault, 'signature')), key)).toBe(
+      true,
+    );
+    expect(verifyIdentityStatement(inviterMessage, fromHex(text(inviter, 'signature')), key)).toBe(
+      true,
+    );
+    // A signature made for one statement does not verify for the other.
+    expect(verifyIdentityStatement(inviterMessage, fromHex(text(vault, 'signature')), key)).toBe(
+      false,
+    );
   });
 
   it('builds a signed identity deletion as the vectors do', () => {

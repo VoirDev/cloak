@@ -124,7 +124,7 @@ internal data class SectionWriteFields(
     val ciphertextHash: ByteString?,
 )
 
-/** Canonical messages that clients sign and the server verifies (`PROTOCOL.md` §5, §7, §8). */
+/** Canonical messages that clients sign and the server verifies (`PROTOCOL.md` §5, §7, §8, §9). */
 internal object Messages {
     /**
      * Builds a key version's fingerprint message (§5.1).
@@ -206,6 +206,38 @@ internal object Messages {
             .u32(keyVersion)
             .u32(credentialsVersion)
             .u64(notAfter)
+            .build()
+
+    /**
+     * Builds the statement a user signs to accept a vault (§9, §12.4).
+     *
+     * @param userId The accepting user.
+     * @param keyVersion Their current identity key version, whose signing key signs.
+     * @param vaultId The vault they accept.
+     * @return Canonical message.
+     */
+    fun vaultAcceptance(userId: UserId, keyVersion: Int, vaultId: VaultId): ByteString =
+        Canonical()
+            .label("cloak/v1/vault-acceptance")
+            .uuid(userId.value)
+            .u32(keyVersion)
+            .uuid(vaultId.value)
+            .build()
+
+    /**
+     * Builds the statement a user signs to accept every vault one person adds them to (§9, §12.4).
+     *
+     * @param userId The accepting user.
+     * @param keyVersion Their current identity key version, whose signing key signs.
+     * @param inviterUserId The person whose vaults they accept.
+     * @return Canonical message.
+     */
+    fun inviterAcceptance(userId: UserId, keyVersion: Int, inviterUserId: UserId): ByteString =
+        Canonical()
+            .label("cloak/v1/inviter-acceptance")
+            .uuid(userId.value)
+            .u32(keyVersion)
+            .uuid(inviterUserId.value)
             .build()
 
     /**

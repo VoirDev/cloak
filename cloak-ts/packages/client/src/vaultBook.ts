@@ -1,16 +1,22 @@
 import {
   CloakCryptoError,
+  addedBy,
   encryptionKeyFor,
   equalBytes,
   fromBase64Url,
+  inviterAcceptanceMessage,
   isCloakCryptoError,
+  keysDigest,
   logHead,
   openEnvelope,
   replayVaultLog,
   requireCommittedKey,
   unwrapPreviousKey,
+  vaultAcceptanceMessage,
+  verifyIdentityStatement,
   type IdentitySecrets,
   type LogEntry,
+  type PublicKeys,
   type VaultLogState,
 } from '@voirdev/cloak-crypto';
 
@@ -20,7 +26,13 @@ import { CloakVaultLogError } from './CloakVaultLogError.ts';
 import { body, type CloakApi, type Schemas } from './api.ts';
 import type { Keyring } from './keyring.ts';
 import type { LocalState, LogHead } from './storage/localState.ts';
-import { fromWireEntry, validVault } from './wire.ts';
+import {
+  fromWireEntry,
+  validLogPage,
+  validVault,
+  validVaultBatch,
+  validVaultKeys,
+} from './wire.ts';
 
 /** A vault as this session verified it. */
 export interface VaultRecord {
@@ -43,6 +55,8 @@ export interface Self {
   readonly hostUserId: string;
   /** Current identity key version. */
   readonly keyVersion: number;
+  /** Public keys of the current version. */
+  readonly keys: PublicKeys;
   /** Private keys of the current version, with earlier encryption keys. */
   readonly secrets: IdentitySecrets;
 }
@@ -57,6 +71,14 @@ interface VaultStart {
   readonly stored: LogHead | undefined;
   /** Log entries are read after this `seq`. */
   readonly afterSeq: number;
+}
+
+/** A vault's log as {@link VaultBook} read and verified it after a start. */
+interface ReadLog {
+  /** The verified state. */
+  readonly state: VaultLogState;
+  /** The entries read, in log order. */
+  readonly fresh: readonly Schemas['LogEntry'][];
 }
 
 /**
@@ -112,7 +134,7 @@ export class VaultBook {
     const view = validVault(
       await body(this.#api.GET('/vaults/{vaultId}', { params: { path: { vaultId } } })),
     );
-    return this.#settle(vaultId, start, view, await this.#readLog(vaultId, start.afterSeq));
+    return this.#settle(vaultId, start, view, await this.#readLog(vaultId, start));
   }
 
   /**
@@ -131,15 +153,17 @@ export class VaultBook {
       const batch = unique.slice(index, index + 100);
       const starts = new Map<string, VaultStart>();
       for (const vaultId of batch) starts.set(vaultId, await this.#start(vaultId));
-      const response = await body(
-        this.#api.POST('/vaults/batch-get', {
-          body: {
-            items: batch.map((vaultId) => {
-              const afterSeq = starts.get(vaultId)?.afterSeq ?? 0;
-              return { vaultId, ...(afterSeq === 0 ? {} : { afterSeq }) };
-            }),
-          },
-        }),
+      const response = validVaultBatch(
+        await body(
+          this.#api.POST('/vaults/batch-get', {
+            body: {
+              items: batch.map((vaultId) => {
+                const afterSeq = starts.get(vaultId)?.afterSeq ?? 0;
+                return { vaultId, ...(afterSeq === 0 ? {} : { afterSeq }) };
+              }),
+            },
+          }),
+        ),
       );
       // Every vault asked must be answered, in order: a vault left out would otherwise look like
       // one the user no longer belongs to.
@@ -157,11 +181,8 @@ export class VaultBook {
         if (item.vault === undefined || item.log === undefined)
           throw new CloakVaultLogError(vaultId, 'state_mismatch');
         const view = validVault(item.vault);
-        const entries = [...item.log.items];
-        const last = entries.at(-1);
-        if (last !== undefined && last.seq < item.log.headSeq)
-          entries.push(...(await this.#readLog(vaultId, last.seq)));
-        records.set(vaultId, await this.#settle(vaultId, start, view, entries));
+        const read = await this.#readLog(vaultId, start, item.log);
+        records.set(vaultId, await this.#settle(vaultId, start, view, read));
       }
     }
     return records;
@@ -189,16 +210,15 @@ export class VaultBook {
     return { from, baselineSeq: baselineSeq ?? 0, stored, afterSeq: from?.points.length ?? 0 };
   }
 
-  /** Verifies a vault from its start, the server's view and the log entries after the start. */
+  /** Settles a vault from its start, the server's view and the log verified after the start. */
   async #settle(
     vaultId: string,
     start: VaultStart,
     view: Schemas['Vault'],
-    fresh: readonly Schemas['LogEntry'][],
+    { state, fresh }: ReadLog,
   ): Promise<VaultRecord> {
     if (view.id !== vaultId) throw new CloakVaultLogError(vaultId, 'state_mismatch');
-    const { from, baselineSeq, stored } = start;
-    const state = await this.#replay(vaultId, fresh, from, baselineSeq);
+    const { baselineSeq, stored } = start;
     const head = logHead(state);
 
     if (stored !== undefined) {
@@ -220,14 +240,91 @@ export class VaultBook {
     // A head behind what this device verified, kept in memory or in a snapshot, is a rollback.
     if (view.logSeq < head.seq) throw new CloakVaultLogError(vaultId, 'rollback');
     if (fresh.length > 0) await this.#local.raiseSnapshot(vaultId, state);
+    // Only now that the entries verified does this device meet their authors and subjects
+    // (`PROTOCOL.md` §9).
+    await this.#keyring.pin(
+      fresh.flatMap((entry) =>
+        entry.subjectUserId === undefined
+          ? [entry.authorUserId]
+          : [entry.authorUserId, entry.subjectUserId],
+      ),
+    );
     // Every member's keys, so the vault's public view can name each member and tell whose keys
     // were replaced; already loaded ones are not fetched again.
     await this.#keyring.load(state.members.keys());
+    await this.#vouch(vaultId, state, view, fresh);
     await this.#local.advanceHead(vaultId, { seq: head.seq, entryHash: head.hash });
 
     const record: VaultRecord = { state, view, baselineSeq };
     this.#records.set(vaultId, record);
     return record;
+  }
+
+  /**
+   * Vouches for the members a vault commits, when the user's signed acceptance in its view makes
+   * it vouch (`PROTOCOL.md` §9): for every member the first time this device finds it vouching,
+   * then for those its new entries name. A vault that stops vouching, such as after a key
+   * replacement, starts over when it vouches again.
+   */
+  async #vouch(
+    vaultId: string,
+    state: VaultLogState,
+    view: Schemas['Vault'],
+    fresh: readonly Schemas['LogEntry'][],
+  ): Promise<void> {
+    const before = await this.#local.vouching(vaultId);
+    if (!this.#vouches(vaultId, state, view)) {
+      if (before) await this.#local.setVouching(vaultId, false);
+      return;
+    }
+    const people = before
+      ? fresh.flatMap((entry) =>
+          entry.subjectUserId === undefined
+            ? [entry.authorUserId]
+            : [entry.authorUserId, entry.subjectUserId],
+        )
+      : [...state.members.keys()];
+    for (const userId of new Set(people)) {
+      const membership = state.members.get(userId);
+      if (userId === this.#self.userId || membership === undefined) continue;
+      // The pin is vouched for only when the keys the vault commits are on its chain.
+      const pin = await this.#local.pin(userId);
+      const committed = this.#keyring.keysOf(userId, membership.keyVersion);
+      if (
+        pin !== undefined &&
+        committed !== undefined &&
+        equalBytes(keysDigest(committed), membership.keysDigest)
+      )
+        await this.#local.vouch(userId, pin.keysDigest);
+    }
+    if (!before) await this.#local.setVouching(vaultId, true);
+  }
+
+  /**
+   * Whether a vault vouches (`PROTOCOL.md` §9): its view carries the user's acceptance, signed
+   * with their current keys, of the vault or of the person the verified log says added them.
+   */
+  #vouches(vaultId: string, state: VaultLogState, view: Schemas['Vault']): boolean {
+    const { acceptance } = view;
+    const self = this.#self;
+    if (acceptance?.keyVersion !== self.keyVersion) return false;
+    const inviter = acceptance.inviterUserId;
+    if (inviter !== undefined && addedBy(state, self.userId) !== inviter) return false;
+    const message =
+      inviter === undefined
+        ? vaultAcceptanceMessage(self.userId, self.keyVersion, vaultId)
+        : inviterAcceptanceMessage(self.userId, self.keyVersion, inviter);
+    try {
+      return verifyIdentityStatement(
+        message,
+        fromBase64Url(acceptance.signature),
+        self.keys.signingPublicKey,
+      );
+    } catch (error: unknown) {
+      // A signature that does not even decode vouches for nothing, like one that does not verify.
+      if (isCloakCryptoError(error)) return false;
+      throw error;
+    }
   }
 
   /**
@@ -327,10 +424,12 @@ export class VaultBook {
     const wraps = new Map<number, string | undefined>();
     let after = afterVersion;
     while (after < head) {
-      const page = await body(
-        this.#api.GET('/vaults/{vaultId}/keys', {
-          params: { path: { vaultId }, query: { afterVersion: after, limit: 100 } },
-        }),
+      const page = validVaultKeys(
+        await body(
+          this.#api.GET('/vaults/{vaultId}/keys', {
+            params: { path: { vaultId }, query: { afterVersion: after, limit: 100 } },
+          }),
+        ),
       );
       for (const item of page.items) wraps.set(item.version, item.previousWrappedKey);
       const last = page.items.at(-1);
@@ -340,84 +439,110 @@ export class VaultBook {
     return wraps;
   }
 
-  /** Reads log entries after [afterSeq] to the head, page by page. */
-  async #readLog(vaultId: string, afterSeq: number): Promise<Schemas['LogEntry'][]> {
-    const entries: Schemas['LogEntry'][] = [];
-    let after = afterSeq;
+  /**
+   * Reads a vault's log entries after [start] to the head the server names, verifying them page
+   * by page as their requests end, so a forged page stops the read. The log has no length bound,
+   * so the server could otherwise keep a reader paging forever: every page must continue right
+   * after the last entry read and bring at least one until the head, and the head must stay the
+   * one the first page named. Entries of a request not ended yet wait for the next page; a request
+   * removes each member at most once, so more of them than members plus one is a lie.
+   *
+   * @param vaultId The vault.
+   * @param start Where verifying starts.
+   * @param first The first page, when it came with the vault's view.
+   * @returns The verified state and the entries read.
+   * @throws {CloakVaultLogError} `state_mismatch` for pages that do not continue the read, and as
+   *   the log's rules say for entries that do not verify.
+   */
+  async #readLog(
+    vaultId: string,
+    start: VaultStart,
+    first?: Schemas['VaultLogPage'],
+  ): Promise<ReadLog> {
+    const fresh: Schemas['LogEntry'][] = [];
+    let state = start.from;
+    let pending: Schemas['LogEntry'][] = [];
+    let after = start.afterSeq;
+    let headSeq: number | undefined;
+    let served = first;
     for (;;) {
-      const page = await body(
-        this.#api.GET('/vaults/{vaultId}/log', {
-          params: {
-            path: { vaultId },
-            query: { ...(after === 0 ? {} : { afterSeq: after }), limit: 100 },
-          },
-        }),
+      const page = validLogPage(
+        served ??
+          (await body(
+            this.#api.GET('/vaults/{vaultId}/log', {
+              params: {
+                path: { vaultId },
+                query: { ...(after === 0 ? {} : { afterSeq: after }), limit: 100 },
+              },
+            }),
+          )),
       );
-      entries.push(...page.items);
-      const last = page.items.at(-1);
-      if (last === undefined || last.seq >= page.headSeq) return entries;
-      after = last.seq;
+      served = undefined;
+      const continues = page.items.every((entry, index) => entry.seq === after + 1 + index);
+      if (
+        !continues ||
+        (headSeq !== undefined && page.headSeq !== headSeq) ||
+        after + page.items.length > Math.max(page.headSeq, after) ||
+        (page.items.length === 0 && after < page.headSeq)
+      )
+        throw new CloakVaultLogError(vaultId, 'state_mismatch');
+      headSeq = page.headSeq;
+      fresh.push(...page.items);
+      pending.push(...page.items);
+      after += page.items.length;
+      const ended = pending.findLastIndex((entry) => entry.requestEnd) + 1;
+      if (ended > 0) {
+        state = await this.#replay(vaultId, pending.slice(0, ended), state);
+        pending = pending.slice(ended);
+      }
+      if (pending.length > (state?.members.size ?? 0) + 1)
+        throw new CloakVaultLogError(vaultId, 'state_mismatch');
+      if (after >= headSeq) break;
     }
+    // A request the head leaves unfinished is refused by the log's own rules.
+    if (pending.length > 0 || state === undefined)
+      state = await this.#replay(vaultId, pending, state);
+    // Rule 4 (§7.6), for entries this device had not verified before: a later entry anywhere in
+    // the log that records the replacement lifts it, so it is judged once the whole log is read.
+    // The user's own old keys are exempt: this device must verify the log to record the
+    // replacement, and lists what they signed for review instead (§5.6 step 5).
+    const recorded = state.recordedKeyVersions;
+    const superseded = fresh.find(
+      (entry) =>
+        entry.seq > start.baselineSeq &&
+        entry.authorUserId !== this.#self.userId &&
+        this.isSuperseded(recorded, entry.authorUserId, entry.authorKeyVersion),
+    );
+    if (superseded !== undefined)
+      throw new CloakVaultLogError(vaultId, 'superseded_keys', superseded.seq);
+    return { state, fresh };
   }
 
-  /**
-   * Replays new entries onto [from]: entries up to [baselineSeq], which this device verified
-   * before, without the superseded check; the rest with it, except for the user's own entries.
-   */
+  /** Replays entries onto [from]; rule 4 is left to {@link #readLog}, which sees the whole log. */
   async #replay(
     vaultId: string,
     fresh: readonly Schemas['LogEntry'][],
     from: VaultLogState | undefined,
-    baselineSeq: number,
   ): Promise<VaultLogState> {
     if (fresh.length === 0) {
       if (from !== undefined) return from;
       throw new CloakVaultLogError(vaultId, 'broken_chain', 1);
     }
     await this.#loadKeys(fresh);
-    let state = from;
     let previousHash = from === undefined ? undefined : logHead(from).hash;
     const entries: LogEntry[] = fresh.map((wire) => {
       const entry = fromWireEntry(vaultId, wire, previousHash);
       previousHash = entry.entryHash;
       return entry;
     });
-    // A later entry that records the replacement lifts rule 4 for the entries before it.
-    const recorded = new Map(from?.recordedKeyVersions ?? []);
-    for (const entry of fresh) {
-      if (entry.kind === 'member_keys_replaced' && entry.subjectKeyVersion !== undefined) {
-        recorded.set(
-          entry.authorUserId,
-          Math.max(recorded.get(entry.authorUserId) ?? 0, entry.subjectKeyVersion),
-        );
-      }
-    }
-    const before = entries.filter((entry) => entry.seq <= baselineSeq);
-    const after = entries.filter((entry) => entry.seq > baselineSeq);
-    for (const [part, checkSuperseded] of [
-      [before, false],
-      [after, true],
-    ] as const) {
-      if (part.length === 0) continue;
-      const result = replayVaultLog(
-        vaultId,
-        part,
-        {
-          keysOf: (userId, keyVersion) => this.#keyring.keysOf(userId, keyVersion),
-          // The user's own old keys are exempt: this device must verify the log to record the
-          // replacement, and lists what they signed for review instead (§5.6 step 5).
-          isSuperseded: checkSuperseded
-            ? (userId, keyVersion) =>
-                userId !== this.#self.userId && this.isSuperseded(recorded, userId, keyVersion)
-            : undefined,
-        },
-        state,
-      );
-      if (!result.ok) throw new CloakVaultLogError(vaultId, result.reason, result.failSeq);
-      state = result.state;
-    }
-    if (state === undefined) throw new CloakVaultLogError(vaultId, 'broken_chain', 1);
-    return state;
+    const result = replayVaultLog(
+      vaultId,
+      entries,
+      { keysOf: (userId, keyVersion) => this.#keyring.keysOf(userId, keyVersion) },
+      from,
+    );
+    if (!result.ok) throw new CloakVaultLogError(vaultId, result.reason, result.failSeq);
+    return result.state;
   }
 
   /** Loads the keys of every author and subject, fetching again anyone with a version not yet known. */

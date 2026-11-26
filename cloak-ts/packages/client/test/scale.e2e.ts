@@ -9,6 +9,7 @@ import {
   type CloakStorage,
   type SectionChange,
 } from '../src/index.ts';
+import { register } from './credentials.ts';
 
 /** A request a client sent, as the test sees it. */
 interface Sent {
@@ -63,7 +64,7 @@ async function counted(): Promise<Counted> {
   const sent: Sent[] = [];
   const user = { before: undefined } as Counted;
   const client = recordingClient(userId, storage, sent, user);
-  const registered = await client.register({ userId, password: 'password' });
+  const registered = await register(client, { userId, password: 'password' });
   return Object.assign(user, { userId, client, storage, sent, ...registered });
 }
 
@@ -143,15 +144,24 @@ describe('the client on large vaults', () => {
     expect(count(device, 'GET', /\/checkpoints\/\d+\/leaves$/)).toBe(4);
     expect(count(device, 'POST', /\/checkpoint-proofs\/batch-get$/)).toBe(0);
 
-    // One section is checked with proofs, all in one request.
-    const single = changes.sections[0];
-    if (single === undefined) throw new Error('No section');
+    // One section is checked with proofs against the two checkpoints after its write. The log
+    // signs a checkpoint's root, not its size, and one batch may name at most a vault's worth of
+    // leaves, so each checkpoint whose size the session has not learned is asked about alone.
+    const [single, another] = changes.sections;
+    if (single === undefined || another === undefined) throw new Error('No section');
     const reader = await anotherDevice(alice);
     expect((await reader.session.readSection(vault.id, single.nodeId, single.name)).status).toBe(
       'ok',
     );
-    expect(count(reader, 'POST', /\/checkpoint-proofs\/batch-get$/)).toBe(1);
+    expect(count(reader, 'POST', /\/checkpoint-proofs\/batch-get$/)).toBe(2);
     expect(count(reader, 'GET', /\/checkpoints\/\d+\/leaves$/)).toBe(0);
+
+    // Their answers taught their sizes: another section is checked against both in one request.
+    reader.sent.length = 0;
+    expect((await reader.session.readSection(vault.id, another.nodeId, another.name)).status).toBe(
+      'ok',
+    );
+    expect(count(reader, 'POST', /\/checkpoint-proofs\/batch-get$/)).toBe(1);
   });
 
   it('chains a batch of writes with one lookup, never a read per section', async () => {

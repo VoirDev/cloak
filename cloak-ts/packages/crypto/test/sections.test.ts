@@ -37,6 +37,7 @@ import {
 const SECTIONS = vectors('sections.json');
 const LOG = vectors('vault-log.json');
 const CASES = objects(SECTIONS, 'cases');
+const OWNER_ID = '0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e';
 
 /** The verified scenario log. */
 function scenarioLog(): VaultLogState {
@@ -143,6 +144,42 @@ describe('section writes', () => {
         expected,
       );
     }
+  });
+
+  it.each([
+    ['a vault key version of 2^32', { vaultKeyVersion: 2 ** 32 }],
+    ['a writer key version of 2^32', { writerKeyVersion: 2 ** 32 }],
+    ['a negative data version', { dataVersion: -1 }],
+    ['a fractional log seq', { logSeq: 1.5 }],
+    ['a head hash of 31 bytes', { logHeadHash: new Uint8Array(31) }],
+    ['a ciphertext hash of 33 bytes', { ciphertextHash: new Uint8Array(33) }],
+    ['a section name with a lone surrogate', { sectionName: 'x\uDC00' }],
+    ['an uppercase writer id', { writerUserId: OWNER_ID.toUpperCase() }],
+  ] as const)('refuses a header with %s as malformed, without throwing', (_, change) => {
+    const json = sectionCase('owner-secrets-2');
+    const write = toSectionWrite(json);
+    const header = { ...toSectionHeader(write), signature: write.signature, ...change };
+    const checkpointLeaves = checkpointLeavesOf(json, write, log);
+    expect(verifySectionStanding(header, log, { keysOf, checkpointLeaves })).toEqual({
+      ok: false,
+      reason: 'malformed',
+    });
+  });
+
+  it('refuses another hash at a seq that is no head as a fork', () => {
+    const json = sectionCase('owner-not-a-head');
+    const write = toSectionWrite(json);
+    const header = { ...toSectionHeader(write), signature: write.signature };
+    const checkpointLeaves = checkpointLeavesOf(json, write, log);
+    expect(verifySectionStanding(header, log, { keysOf, checkpointLeaves })).toEqual({
+      ok: false,
+      reason: 'not_a_head',
+    });
+    const forked = { ...header, logHeadHash: new Uint8Array(32).fill(1) };
+    expect(verifySectionStanding(forked, log, { keysOf, checkpointLeaves })).toEqual({
+      ok: false,
+      reason: 'fork',
+    });
   });
 
   it('refuses a write whose checkpoints were not looked up', () => {

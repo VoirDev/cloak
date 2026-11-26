@@ -1,22 +1,29 @@
 package dev.voir.cloak.server.vault.persistence
 
 import dev.voir.cloak.server.identity.domain.UserId
+import dev.voir.cloak.server.identity.persistence.IdentitiesTable
 import dev.voir.cloak.server.persistence.toByteString
 import dev.voir.cloak.server.protocol.Membership
+import dev.voir.cloak.server.vault.domain.Acceptance
 import dev.voir.cloak.server.vault.domain.Role
 import dev.voir.cloak.server.vault.domain.VaultId
 import kotlinx.io.bytestring.ByteString
+import org.jetbrains.exposed.v1.core.JoinType
 import org.jetbrains.exposed.v1.core.ResultRow
+import org.jetbrains.exposed.v1.core.alias
 import org.jetbrains.exposed.v1.core.and
 import org.jetbrains.exposed.v1.core.eq
 import org.jetbrains.exposed.v1.core.inList
 import org.jetbrains.exposed.v1.core.isNull
+import org.jetbrains.exposed.v1.core.neq
+import org.jetbrains.exposed.v1.core.notExists
+import org.jetbrains.exposed.v1.core.or
 import org.jetbrains.exposed.v1.jdbc.deleteWhere
 import org.jetbrains.exposed.v1.jdbc.insert
-import org.jetbrains.exposed.v1.jdbc.insertIgnore
 import org.jetbrains.exposed.v1.jdbc.select
 import org.jetbrains.exposed.v1.jdbc.selectAll
 import org.jetbrains.exposed.v1.jdbc.update
+import org.jetbrains.exposed.v1.jdbc.upsert
 import kotlin.time.Instant
 
 /**
@@ -27,9 +34,11 @@ import kotlin.time.Instant
  * @property membership Role and committed keys.
  * @property keyEnvelope The current vault key sealed to the committed keys, or `null`.
  * @property envelopeKeyVersion Vault key version [keyEnvelope] holds, or `null`.
- * @property accepted Whether the member accepted the vault (`PROTOCOL.md` §12.4); unsigned.
- * @property addedByUserId Who added the member, per the log; `null` for the vault's creator.
  * @property addedAt Instant the member was added.
+ * @property accepted Whether the server lists the vault as accepted by the member (`PROTOCOL.md` §12.4).
+ * @property addedByUserId Who added the member, per the log; `null` for the vault's creator.
+ * @property acceptance The member's own signed `vaultAcceptance` (§9), the latest they sent; `null`
+ *   when they accepted only the person who added them, or nothing.
  */
 internal data class MemberRow(
     /** Vault. */
@@ -48,6 +57,8 @@ internal data class MemberRow(
     val accepted: Boolean = true,
     /** Who added the member. */
     val addedByUserId: UserId? = null,
+    /** The member's own signed acceptance. */
+    val acceptance: Acceptance? = null,
 )
 
 /** Reads and writes `cloak.vault_members`. Every function runs inside the caller's transaction. */
@@ -87,6 +98,30 @@ internal object MemberRepository {
         VaultMembersTable.select(VaultMembersTable.vaultId)
             .where { VaultMembersTable.userId eq userId.value }
             .map { VaultId(it[VaultMembersTable.vaultId]) }
+
+    /**
+     * Returns the vaults of a user in which every other member is a deleted identity, or which have
+     * no other member: the vaults nobody could act on once the user's identity is deleted too
+     * (`PROTOCOL.md` §5.7). Lock the vaults first, so no membership or deletion of their members
+     * changes before the transaction ends: every deletion of a member locks the vault too.
+     *
+     * @param userId Member.
+     * @return Vault ids, deleted vaults included.
+     */
+    fun vaultsWithoutOtherLiveMembers(userId: UserId): List<VaultId> {
+        val others = VaultMembersTable.alias("others")
+        val otherLive = others
+            .join(IdentitiesTable, JoinType.INNER, others[VaultMembersTable.userId], IdentitiesTable.userId)
+            .select(others[VaultMembersTable.userId])
+            .where {
+                (others[VaultMembersTable.vaultId] eq VaultMembersTable.vaultId) and
+                    (others[VaultMembersTable.userId] neq userId.value) and IdentitiesTable.deletedAt.isNull()
+            }
+        return VaultMembersTable.select(VaultMembersTable.vaultId)
+            .where { (VaultMembersTable.userId eq userId.value) and notExists(otherLive) }
+            .orderBy(VaultMembersTable.vaultId)
+            .map { VaultId(it[VaultMembersTable.vaultId]) }
+    }
 
     /**
      * Clears every envelope sealed to a user, in every vault they are a member of.
@@ -145,6 +180,8 @@ internal object MemberRepository {
             it[envelopeKeyVersion] = row.envelopeKeyVersion
             it[accepted] = row.accepted
             it[addedByUserId] = row.addedByUserId?.value
+            it[acceptanceKeyVersion] = row.acceptance?.keyVersion
+            it[acceptanceSignature] = row.acceptance?.signature?.toByteArray()
             it[addedAt] = row.addedAt
         }
     }
@@ -181,35 +218,76 @@ internal object MemberRepository {
             .count()
 
     /**
-     * Marks a membership accepted.
+     * Marks a membership accepted with the member's signed acceptance, replacing any earlier one.
      *
      * @param vaultId Vault.
      * @param userId Member.
+     * @param acceptance Their verified `vaultAcceptance`.
      */
-    fun accept(vaultId: VaultId, userId: UserId) {
+    fun accept(vaultId: VaultId, userId: UserId, acceptance: Acceptance) {
         VaultMembersTable.update(where = { (VaultMembersTable.vaultId eq vaultId.value) and (VaultMembersTable.userId eq userId.value) }) {
             it[accepted] = true
+            it[acceptanceKeyVersion] = acceptance.keyVersion
+            it[acceptanceSignature] = acceptance.signature.toByteArray()
         }
     }
 
     /**
-     * Accepts every vault one person added a user to, and remembers to accept their later ones.
+     * Accepts every vault one person added a user to, and remembers to accept their later ones,
+     * with the user's signed acceptance of them, which replaces any earlier one. The memberships
+     * get no signature of their own.
      *
      * @param userId The user who accepts.
      * @param inviterUserId The person whose vaults they accept.
-     * @param at When.
+     * @param acceptance The user's verified `inviterAcceptance`.
+     * @param at When; kept from the first acceptance of the person.
      */
-    fun acceptFrom(userId: UserId, inviterUserId: UserId, at: Instant) {
+    fun acceptFrom(userId: UserId, inviterUserId: UserId, acceptance: Acceptance, at: Instant) {
         VaultMembersTable.update(
             where = { (VaultMembersTable.userId eq userId.value) and (VaultMembersTable.addedByUserId eq inviterUserId.value) },
         ) {
             it[accepted] = true
         }
-        AcceptedInvitersTable.insertIgnore {
+        AcceptedInvitersTable.upsert(onUpdateExclude = listOf(AcceptedInvitersTable.acceptedAt)) {
             it[AcceptedInvitersTable.userId] = userId.value
             it[AcceptedInvitersTable.inviterUserId] = inviterUserId.value
+            it[keyVersion] = acceptance.keyVersion
+            it[signature] = acceptance.signature.toByteArray()
             it[acceptedAt] = at
         }
+    }
+
+    /**
+     * Deletes a user's acceptances of people and people's acceptances of the user, for the
+     * deletion of the user's identity: nobody can add them to a vault again or be added by them.
+     *
+     * @param userId User.
+     */
+    fun deleteInviterAcceptances(userId: UserId) {
+        AcceptedInvitersTable.deleteWhere {
+            (AcceptedInvitersTable.userId eq userId.value) or (AcceptedInvitersTable.inviterUserId eq userId.value)
+        }
+    }
+
+    /**
+     * Loads a user's signed acceptances of several people, in one query.
+     *
+     * @param userId The user who accepted.
+     * @param inviterUserIds The people.
+     * @return Acceptance by person; people the user has not accepted are absent.
+     */
+    fun inviterAcceptances(userId: UserId, inviterUserIds: Collection<UserId>): Map<UserId, Acceptance> {
+        if (inviterUserIds.isEmpty()) return emptyMap()
+        return AcceptedInvitersTable
+            .select(AcceptedInvitersTable.inviterUserId, AcceptedInvitersTable.keyVersion, AcceptedInvitersTable.signature)
+            .where {
+                (AcceptedInvitersTable.userId eq userId.value) and
+                    (AcceptedInvitersTable.inviterUserId inList inviterUserIds.map(UserId::value))
+            }
+            .associate {
+                UserId(it[AcceptedInvitersTable.inviterUserId]) to
+                    Acceptance(it[AcceptedInvitersTable.keyVersion], it[AcceptedInvitersTable.signature].toByteString())
+            }
     }
 
     /**
@@ -284,5 +362,8 @@ internal object MemberRepository {
             addedAt = row[VaultMembersTable.addedAt],
             accepted = row[VaultMembersTable.accepted],
             addedByUserId = row[VaultMembersTable.addedByUserId]?.let(::UserId),
+            acceptance = row[VaultMembersTable.acceptanceKeyVersion]?.let { keyVersion ->
+                Acceptance(keyVersion, checkNotNull(row[VaultMembersTable.acceptanceSignature]).toByteString())
+            },
         )
 }

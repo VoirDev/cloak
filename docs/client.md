@@ -5,10 +5,11 @@ endpoints and does every encryption, decryption, signature and log check on the 
 `@voirdev/cloak-crypto`; the server only stores ciphertext and signed entries, and nothing it
 returns is used unchecked.
 
-People are named by the host's own user ids everywhere: `register({ userId })`, `addMember`,
-`members[].userId`, a write's `writerUserId`. The host's authentication must give the same id for
-the request. Underneath, Cloak names each user by a UUID derived from it (`cloakUserId` in
-`@voirdev/cloak-crypto`), and accepts a host id the server names only when it derives that UUID.
+People are named by the host's own user ids everywhere: `prepareRegistration({ userId })`,
+`addMember`, `members[].userId`, a write's `writerUserId`. The host's authentication must give the
+same id for the request. Underneath, Cloak names each user by a UUID derived from it
+(`cloakUserId` in `@voirdev/cloak-crypto`), and accepts a host id the server names only when it
+derives that UUID.
 
 Install it from GitHub Packages, with a token that may read packages, after pointing the scope at
 the registry in `.npmrc`:
@@ -31,11 +32,13 @@ const cloak = createCloakClient({
 const status = await cloak.identityStatus(); // "registered" | "none" | "deleted"
 // "deleted": the identity was deleted, and this host user can never register again.
 
-// First time ("none"): show both codes once and ask the user to keep them.
-const { session, secretKeyCode, recoveryKeyCode } = await cloak.register({
+// First time ("none"): show both codes and ask the user to keep them, then register.
+const registration = await cloak.prepareRegistration({
   userId: hostUserId, // the host's id of the signed-in user
   password,
 });
+await showOnce(registration.secretKeyCode, registration.recoveryKeyCode);
+const session = await registration.complete(); // call it again after a failure
 
 // Later ("registered"), on a new device: the code once, then the password alone if the device
 // remembers it (`remembersSecretKey(hostUserId)` tells whether to ask for the code).
@@ -75,6 +78,11 @@ await session.rotate(shared.id, [bobId]); // removes Bob and gives the vault a n
 const read = await session.readNode(nodeIdFor(node)); // every section the user can read, checked
 ```
 
+`createCloakClient` takes the `baseUrl` of the host's `/cloak/v1` and, optionally, `fetch` (the
+global one by default) and `headers`, a function read before every request for what the host's
+authentication needs, such as a bearer token; cookie sessions need none. `storage` and
+`passwordHasher` are below.
+
 ## Trust
 
 - **Vault logs.** Before using a vault, a session replays its log (`PROTOCOL.md` §7.6): the hash
@@ -89,21 +97,42 @@ const read = await session.readNode(nodeIdFor(node)); // every section the user 
   `status: 'refused'` and the reason, never with its content.
 - **Checkpoints.** What a checkpoint holds is verified against its signed root before use: a
   batch of proofs when a few sections are checked against it, or its whole leaf list, whose root
-  the client recomputes, when many are. A proof or list that does not verify throws
+  the client recomputes, when many are. A proof batch names checkpoints holding at most a vault's
+  limit of live sections together, as the server requires; the log signs only a checkpoint's root,
+  so a checkpoint whose size the session has not yet learned from a verified proof or leaf list is
+  asked about on its own. A proof or list that does not verify throws
   `CloakVaultLogError` (`state_mismatch`) rather than refusing the write it concerns. Building a
   checkpoint reads only section headers, never content, and a retry after `checkpoint_conflict`
   reads only the headers written since.
-- **People.** The first time a device meets someone it pins their first key version and follows
-  their key statements from there; other keys for a pinned version throw `CloakKeyChangedError`.
-  Adding someone the device never met throws `CloakFingerprintRequiredError` until the user
-  confirms their fingerprint. A confirmed fingerprint must lie on the person's key chain from
-  version 1, which is then pinned; with a pin, it must lie on the chain from the pin. The newest
-  version verified is kept, so a server that later hides newer statements raises
-  `CloakKeyChangedError`.
-- **Responses.** Every response is parsed with a schema before use; anything malformed, or a
-  write served under another address than asked, throws `CloakApiError` (`unexpected_response`)
+- **People.** A device meets someone when a log entry by or about them verifies, or a write of
+  theirs stands; it then pins their first key version and follows their key statements from there.
+  Keys the server serves for a person named only in something that does not verify are used for that
+  check alone and never pinned. Other keys for a pinned version throw `CloakKeyChangedError`. Adding
+  someone throws `CloakFingerprintRequiredError` until the user confirms their fingerprint, unless a
+  vault the user accepted commits their keys (see [Invitations](#invitations)). A confirmed
+  fingerprint must lie on the person's key chain from version 1, which is then pinned; with a pin,
+  it must lie on the chain from the pin. The newest version verified is kept, so a server that later
+  hides newer statements, or leaves a pinned person out of an answer altogether, raises
+  `CloakKeyChangedError`. A typed fingerprint is read as codes are (`PROTOCOL.md` §10): case, spaces
+  and hyphens do not matter, and `O` reads as `0`, `I` and `L` as `1`.
+- **Responses.** Every response is parsed with a schema before use, and every key, digest,
+  signature and blob in it must have its exact size; anything malformed, or a write served under
+  another address than asked, throws `CloakApiError` (`unexpected_response`)
   or `CloakVaultLogError` (`state_mismatch`). A write's or entry's echo must match what this device
-  signed.
+  signed. A write's `writeHash` is computed from its header, and one served with another is refused
+  `bad_write_hash`; a write's signature is checked every time it is read, except for a write the
+  device keeps in its sealed section cache, which it checked when it first read it.
+- **Pages.** The server picks every page, so each must make progress: a vault's log is verified
+  page by page, each continuing right after the last entry, up to the head the first page named;
+  a change feed ends at the latest change its first page named, lists each section at most once
+  until then, and brings something on every page before the last; a checkpoint's leaf list has
+  no more leaves than a vault may have live sections (`GET /meta`); a page of a listing that
+  promises more brings vaults not listed before. A page that carries ciphertext, of the change
+  feed or of `readNode`, holds no more than one page's sections and bytes (`maxPageSize`,
+  `maxPageBytes`); `readNode` follows its node's cursors until the last page, each page bringing
+  sections not read before, none in a vault the user cannot verify, and no vault more than it
+  stores. Vault data that breaks this throws
+  `CloakVaultLogError` (`state_mismatch`), a listing `CloakApiError` (`unexpected_response`).
 - **Rollback and forks.** The device keeps the newest head of each vault log and the newest write
   of each section it saw (§15). An older log, or a log that does not pass through the kept head,
   throws `CloakVaultLogError` (`rollback`); an older write, or another write of a version seen,
@@ -120,17 +149,39 @@ const read = await session.readNode(nodeIdFor(node)); // every section the user 
 - **Residual risks** are in §16 of the protocol: the server can keep a device on its own branch of
   a vault's history, and content is JSON returned as `unknown`, so validate it before use.
 
+## Credentials
+
+`cloak.unlock({ password, secretKeyCode, rememberSecretKey })` opens the signed-in user's
+identity. Without `secretKeyCode` it uses the secret key this device remembers, and throws
+`CloakSecretKeyMissingError` when there is none. `cloak.changePassword({ password, newPassword,
+secretKeyCode })` changes the master password; the keys, the secret key and the recovery key stay.
+For a lost password or secret key, `cloak.recover({ recoveryKeyCode, newPassword })` sets a new
+password and a new secret key with the recovery key and returns a `CredentialsResult`: the
+`session`, the new `secretKeyCode` to show the user, and the `recoveryKeyCode`, which stays. Each
+new bundle is signed with the user's current signing key (`PROTOCOL.md` §5.5), so the host's
+session alone cannot replace it. A wrong secret throws `CloakUnlockError`.
+
 ## Key replacement
 
-When identity keys may have leaked, `cloak.replaceKeys({ recoveryKeyCode, newPassword })` makes
-new keys signed by the old recovery key, records them in every vault, and returns new codes. The
-old keys lose their rights in each vault where the replacement is recorded. Admins then see
-`rotationDue` and should `rotate`. A vault where recording failed is listed in `failedVaults`;
-retry with `session.recordKeyReplacement(vaultId)`. `unrecognizedEntries` lists, per vault, the
-log entries signed with the old keys that this device did not sign; show them for review, since
-whoever held the old keys may have made them. When a rotation skipped the old keys, the
-member records without the key and an admin calls `deliverEnvelopes(vaultId)`;
-until then reads throw `CloakKeyUnavailableError`.
+When identity keys may have leaked, `cloak.prepareKeyReplacement({ recoveryKeyCode, newPassword })`
+makes new keys signed by the old recovery key and returns the new codes; once the user has kept
+them, `complete()` replaces the keys on the server, records them in every vault and returns a
+`KeyReplacementResult`. The old keys lose their rights in each vault where the replacement is
+recorded. Admins then see `rotationDue` and should `rotate`. A vault where recording failed is
+listed in `failedVaults`; retry with `session.recordKeyReplacement(vaultId)`. `unrecognizedEntries`
+lists, per vault, the log entries signed with the old keys that this device did not sign; show them
+for review, since whoever held the old keys may have made them. When a rotation skipped the old
+keys, the member records without the key and an admin calls `deliverEnvelopes(vaultId)`; until then
+reads throw `CloakKeyUnavailableError`.
+
+Registration and key replacement both come in two steps for the same reason: the server may apply
+the request while its response is lost, and codes shown only after a response would then be gone,
+and the account with them. `prepareRegistration` and `prepareKeyReplacement` send nothing and return
+`PreparedCredentials`: the `secretKeyCode` and `recoveryKeyCode`, and `complete()`, which returns
+the session or the `KeyReplacementResult`. Show the codes, then call `complete()`. Call it again
+after any failure: when no response came (`network_error`) or the server answers a conflict
+(`already_exists`, `identity_version_conflict`), it reads the identity the server holds and finishes
+when that is exactly the prepared keys, and otherwise throws the request's error.
 
 ## Nodes
 
@@ -155,12 +206,40 @@ there, write its sections, delete the old ones. `SectionInfo.node` tells which n
 owner, each section belongs to, and `writerUserId` who wrote it.
 
 `writeSections(changes)` writes up to 100 sections in any of the user's vaults, together or not at
-all, in two requests: one reads the latest write of every section as headers, the other writes.
-A section that was never written comes back from the first as missing, as data rather than an HTTP
-error. `writeSection` and `deleteSection` take the same two requests. A section this device saw
-that the server calls missing or older fails the write with `rollback`, and another write of the
-version it saw with `fork`. Content goes only where its node lives (`PROTOCOL.md` §8.3, rule 6):
-anything else fails with `not_shared` before the server hears of the section.
+all. It verifies each vault's log first, as every change does, then sends two requests: one reads
+the latest write of every section as headers, the other writes. A section that was never written
+comes back from the first as missing, as data rather than an HTTP error. `writeSection` and
+`deleteSection` do the same for one section; a deletion names the node type it signs.
+`moveSection(node, name, fromVaultId, toVaultId)` moves a section to another vault where its node
+lives: a deletion and a first write in one batch. A section this device saw that the server calls
+missing or older fails the write with `rollback`, and another write of the version it saw with
+`fork`. Content goes only where its node lives (`PROTOCOL.md` §8.4, rule 6):
+anything else fails with `not_shared` before the server hears of the section. A user who is not an
+editor of the vault, or whose current keys its log does not commit, as before their key
+replacement is recorded there, fails with `not_an_editor` in the same way, since no reader would
+accept the write whatever the server answers.
+
+## Vaults and members
+
+`createVault()` makes a vault with the user as owner. `openVault(vaultId)` verifies its log and
+returns a `VerifiedVault`, every field from the signed log: the user's `role`, the vault's
+`keyVersion`, the verified head's `logSeq`, `rotationDue`, `deleted` and the `members`, each a
+`VaultMember` with their host `userId`, `role`, committed `keyVersion`, whether that is still
+their newest (`keysCurrent`) and whether the server marks them `deleted`. `listVaults()` returns
+pages (`Page`, with `nextCursor`) of `VaultSummary`, the server's unverified word.
+
+`addMember(vaultId, hostUserId, role)` seals the current key to the person's newest keys;
+`setRole(vaultId, hostUserId, role)` changes a role, with a checkpoint when it takes away the
+right to write; `rotate(vaultId, removeHostIds)` removes members and gives the vault a new key;
+`leave(vaultId)` leaves it. Roles are `viewer`, `editor`, `admin` and `owner`
+([how it works](how-it-works.md#vaults)).
+
+`session.fingerprint` is the user's own fingerprint, to show others. `fingerprintOf(hostUserId)`
+returns a person's fingerprint: of the newest key version this device trusts when it pinned them,
+otherwise of the newest the server serves, on a chain verified from version 1. Once the user
+compared it with the person, `confirmFingerprint(hostUserId, fingerprint)` trusts those keys, so
+the person can be added. `CloakFingerprintRequiredError`
+carries the `fingerprint` the server serves for the person it refused.
 
 ## Invitations
 
@@ -169,27 +248,44 @@ them: `listVaults({ pending: true })` lists it, and the host's access checks do 
 they accept it with `acceptVault(vaultId)`, or accept everything one person adds them to with
 `acceptInvitationsFrom(hostUserId)`. Show pending vaults with who added them
 (`VaultSummary.addedBy`) and let the user decide. `createNode` refuses a vault the user has not
-accepted. Acceptance is the server's help against being added unasked: what a member may read and
-write depends on the vault's log alone. How invitations reach people before they have an account
-is the app's own flow; Cloak adds only registered users.
+accepted. What a member may read and write depends on the vault's log alone. An acceptance is signed
+with the user's keys, so every device of the user can tell which vaults the user chose: only those
+vouch for the people in them, and only people vouched for, by such a vault or by a confirmed
+fingerprint, can be added without one (`PROTOCOL.md` §9). A vault the user never accepted is read
+and verified like any other, but adding someone met only there needs their fingerprint. After
+a key replacement, the acceptances this device signed are signed again with the new keys;
+`unrecognizedAcceptances` lists the vaults whose acceptance it did not sign, which vouch for nobody
+until the user accepts them again. How invitations reach people before they have an account is the
+app's own flow; Cloak adds only registered users.
 
 An owner deletes a vault with `deleteVault(vaultId)`, which signs `vault_deleted`; every member's
-device verifies it and forgets the vault.
+device verifies it and forgets the vault. The owner's device reads the log again first, and throws
+`CloakVaultLogError` (`state_mismatch`) and keeps the vault if the server answered without the
+deletion in its log.
 
 ## Reading vaults
 
-`session.readVault(vaultId)` returns every live section of a vault, checked. The device keeps
-what it read (§15), encrypted like the rest of its state, so a later session reads only what
-changed: a write's signature is checked once, and its standing again whenever the log adds a
-checkpoint. Deleted sections and sections the host removed are left out. A kept record lost or
-put back from an older copy only makes the device read more. `changes(vaultId, afterChange)`
-reads the raw feed instead, with `removed` listing what the host removed.
+Every read returns sections as `DecryptedSection`: the `SectionInfo` of the latest write with a
+`status` of `'ok'` and its `content`, `'deleted'`, or `'refused'` and the `reason`, a
+`CloakSectionErrorReason`. `readSection(vaultId, nodeId, name)` reads one section;
+`readNode(nodeId)` reads every section of a node the user can read, across vaults, as a
+`DecryptedNode`. `nodeIdFor(node)` gives the id of a `NodeRef`.
+
+`session.readVault(vaultId)` returns every live section of a vault, checked, as `VaultContents` with
+the `lastChangeSeq` it covers. The device keeps what it read (§15), encrypted like the rest of its
+state, so a later session reads only what changed: a write's signature is checked once, and its
+standing again whenever the log adds a checkpoint. Deleted sections and sections the host removed
+are left out. A kept record lost or put back from an older copy only makes the device read more.
+`changes(vaultId, afterChange)` reads the change feed itself, checked, as `SectionChanges`: the
+sections whose latest write came after `afterChange`, `removed` listing what the host removed, and
+`lastChangeSeq` to pass back.
 
 ## Groups of vaults
 
 Vaults are independent, so sharing a project means the same change in each of its vaults.
 `openVaults(ids)` verifies many at once. `addMemberToVaults(ids, person, role)` adds vault by
-vault and reports where it failed: stopping halfway gives less access, never more.
+vault and reports where it failed in a `VaultBatchResult` (`added`, and `failed` with each
+vault's error): stopping halfway gives less access, never more.
 `removeFromVaults(ids, people)` removes from up to 100 vaults in one request the server applies to
 all or none, so nobody is left half removed; a refusal names the vault in `CloakApiError.vaultId`.
 Always pass the vaults the user chose: which vaults form a project is the host's unsigned record,
@@ -202,10 +298,13 @@ right after.
 
 ## Deleting accounts
 
-`session.deleteAccount()` deletes every vault where the user is the only member left, leaves every
-other vault they accepted, deletes the identity and clears what this device keeps for the user. It
-changes nothing and throws `CloakAccountNotEmptyError` (with `vaultIds`) while the user is the only
-owner of a vault that has other members: appoint another owner first. Vaults the user never accepted
+`session.deleteAccount()` deletes every vault where the user is the only member, leaves every
+other vault they accepted, deletes the identity and clears what this device keeps for the user. A
+vault whose other members the server all marks deleted is neither left nor deleted: the mark is
+unsigned, so the client signs nothing because of it, and the server deletes that vault, which has
+no living member left, together with the identity. It changes nothing and throws
+`CloakAccountNotEmptyError` (with `vaultIds`) while the user is the only owner of a vault that has
+other members who are not deleted: appoint another owner first. Vaults the user never accepted
 do not hold the deletion up. The deletion is signed and valid for a few minutes, so the host's
 session alone cannot delete an account. The host can also erase a user who cannot do this
 themselves; their memberships then stay, and `VaultMember.deleted` marks them. Nobody seals a vault
@@ -216,11 +315,14 @@ for leaked keys, replace them instead.
 
 ## Storage
 
-Pins, checked host user ids, verified heads and vault snapshots, section marks and this device's own
-writes and entries live in the `CloakStorage` the app passes, per user, encrypted with a key from
-the user's bundle, so the store can neither read nor forge them; it can only delete them, which
-makes them unseen again. After a key replacement records move to the new key as they are read.
-`createIndexedDbStorage()` suits browsers; elsewhere implement the methods over a file or the
+Pins, checked host user ids, verified heads and vault snapshots, section marks, the sections it
+read, and this device's own writes, entries and acceptances live in the `CloakStorage` the app
+passes, per user, encrypted with a key from the user's bundle, so the store can neither read nor
+forge them; it can only delete them, which makes them unseen again. The first unlock after a key
+replacement seals every record of the user under the new key, which is why a store lists its keys
+(`keys(prefix)`); from then on the old key opens nothing. `createIndexedDbStorage()` suits browsers;
+its `IndexedDbStorageOptions` take a `databaseName` (`cloak` by default; another name keeps apps on
+one origin apart) and an `indexedDB` factory. Elsewhere implement the methods over a file or the
 keychain. The default, `createMemoryStorage()`, forgets everything on reload; use it in tests only.
 A vault snapshot keeps one small record per log entry and per membership change, so a later session
 verifies only the entries after it.
@@ -230,23 +332,27 @@ needs only the password; `forgetSecretKey(userId)` removes it.
 
 A device drops a vault's records only on a signed fact: after `leave`, or once the vault's log ends
 in an owner's `vault_deleted`, which `deleteVault` signs and every member verifies. It keeps the
-vault's verified head even then, so a history shown later must continue it. A vault the server stops
-listing or answers `not_found` for is kept, because hiding a vault now and showing an older history
-later would otherwise pass; `session.forgetVault(vaultId)` drops it on the user's say-so.
+vault's verified head even then, so a history shown later must continue it. A former member can no
+longer read the log, so after `leave` the head kept is the departure the device signed: a server
+that only claimed to apply it shows a log without it, which is refused as a rollback. A vault the
+server stops listing or answers `not_found` for is kept, because hiding a vault now and showing an
+older history later would otherwise pass; `session.forgetVault(vaultId)` drops it on the user's
+say-so.
 `cloak.forgetUser(userId)` drops everything the device keeps for a user, for signing out for good. A
 server restored from an older backup looks like a rollback, and is refused as one; only forgetting
 the vault or the user lets the device trust it again, as a new device would.
 
 ## Sessions
 
-A session holds the user's private keys, the vault keys it opened and the keys of its local
-records in memory. `session.close()` turns away new calls at once, waits for running ones, then
-overwrites those keys with zeros; every later call throws `CloakSessionClosedError`, and
-`unlock` makes a new session. Close on sign-out, and to lock an idle app. The remembered secret
-key stays unless `forgetSecretKey` removes it, and the host's own sign-in is untouched.
-JavaScript cannot promise that no other copy of a key or of the typed password is left in memory:
-closing shortens how long keys stay, it does not defend against code already reading the page.
-`deleteAccount` closes the session itself.
+A session names its user by `userId`, the host user id, and `keyVersion`, their current identity key
+version, beside its own `fingerprint`. It holds the user's private keys, the vault keys it opened
+and the keys of its local records in memory. `session.close()` turns away new calls at once, waits
+for running ones, then overwrites those keys with zeros; every later call throws
+`CloakSessionClosedError`, and `unlock` makes a new session. Close on sign-out, and to lock an idle
+app. The remembered secret key stays unless `forgetSecretKey` removes it, and the host's own sign-in
+is untouched. JavaScript cannot promise that no other copy of a key or of the typed password is left
+in memory: closing shortens how long keys stay, it does not defend against code already reading the
+page. `deleteAccount` closes the session itself.
 
 ## Password hashing off the main thread
 
@@ -279,23 +385,32 @@ back to the main thread on its own.
 
 ## Errors
 
-| Error                                                          | When                                                                                                                                                  |
-| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CloakUnlockError`                                             | `wrong_credentials`: the password or the secret key is wrong (the client cannot tell which); `wrong_recovery_key`. Ask the user to type them again    |
-| `CloakApiError`                                                | The server refused, with the API's stable `code`; `network_error` (status 0) when no response arrived, with the cause kept                            |
-| `CloakVaultLogError`, `CloakKeyChangedError`, refused sections | The server, or someone with it, is lying. Show it; never retry silently                                                                               |
-| `CloakSessionClosedError`                                      | The session was closed                                                                                                                                |
-| `CloakPasswordWorkerError`                                     | The password worker failed                                                                                                                            |
-| `CloakCryptoError`                                             | Malformed input, such as a mistyped code (`bad_code`), or KDF parameters outside the protocol's bounds (`invalid_kdf`). Re-exported from this package |
+| Error                                                          | When                                                                                                                                                                                                                                                                          |
+| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CloakUnlockError`                                             | `wrong_credentials`: the password or the secret key is wrong (the client cannot tell which); `wrong_recovery_key`. Ask the user to type them again                                                                                                                            |
+| `CloakSecretKeyMissingError`                                   | `unlock` without `secretKeyCode` on a device that remembers no secret key. Ask for the `CS1-` code                                                                                                                                                                            |
+| `CloakApiError`                                                | The server refused, with the API's stable `code`; `network_error` (status 0) when no response arrived, with the cause kept                                                                                                                                                    |
+| `CloakFingerprintRequiredError`                                | Adding a person no confirmed fingerprint or accepted vault vouches for. Compare its `fingerprint` with them, `confirmFingerprint`, then add them again                                                                                                                        |
+| `CloakSectionError`                                            | A change refused on the device before anything is sent, with the rule as `reason`: `not_shared`, `not_an_editor`, `rollback` or `fork` for a write, `not_shared` for `createNode` in a vault the user has not accepted; `moveSection` of a section that is deleted or refused |
+| `CloakKeyUnavailableError`                                     | The server holds no envelope of the vault's current key for the user's keys, such as after a rotation that skipped replaced keys. An admin calls `deliverEnvelopes`                                                                                                           |
+| `CloakAccountNotEmptyError`                                    | `deleteAccount` while the user is the only owner of vaults, named in `vaultIds`, that have other members not deleted. Appoint another owner first                                                                                                                             |
+| `CloakVaultLogError`, `CloakKeyChangedError`, refused sections | The server, or someone with it, is lying. Show it; never retry silently                                                                                                                                                                                                       |
+| `CloakSessionClosedError`                                      | The session was closed                                                                                                                                                                                                                                                        |
+| `CloakPasswordWorkerError`                                     | The password worker failed                                                                                                                                                                                                                                                    |
+| `CloakCryptoError`                                             | Malformed input, such as a mistyped code (`bad_code`), or KDF parameters outside the protocol's bounds (`invalid_kdf`). Re-exported from this package                                                                                                                         |
+
+`isCloakApiError(error, code)` tells whether a caught value is a `CloakApiError`, with that `code`
+when one is given, and `isCloakCryptoError(error)` whether it is a `CloakCryptoError`.
 
 An aborted request stays the `AbortError` the caller expects. A server that is busy (`503 busy`)
 or rate-limited by the host (`429 rate_limited`) has applied nothing; the client sends the very
 same request again after its `Retry-After`, within a minute in all, and never signs
 anything again for it. A request that got no response is not retried, since a write may have
 been applied. Changes refused because another device moved the log or rotated the key first are
-redone up to three times on fresh state (a checkpoint up to six times, each retry quick), but only
-when the vault really moved: a conflict the server claims without one is thrown, so it cannot
-collect several signed versions of one change.
+tried up to three times in all on fresh state (a checkpoint up to six, each retry quick), but only
+when the vault really moved by what is signed: its verified log, or, for `checkpoint_conflict`, the
+latest writes read again and judged since the checkpoint was drafted. A conflict the server claims
+without either is thrown, so it cannot collect several signed versions of one change.
 
 ## Browser requirements
 
@@ -305,8 +420,9 @@ collect several signed versions of one change.
   worker.
 - **Persistent storage.** A browser may evict IndexedDB under storage pressure. The device then
   loses its pins, verified heads and marks and trusts the server as a new device would, and a
-  remembered secret key is gone. Call `requestPersistentStorage()` after sign-in and tell the user
-  when it answers `denied`.
+  remembered secret key is gone. Call `requestPersistentStorage()` after sign-in: it answers
+  `persisted`, `denied`, or `unsupported` where there is no Storage API, such as in Node.js. Tell
+  the user when it answers `denied`.
 - **Integrity of the code.** The page that runs Cloak sees the password. Serve it so that its
   integrity can be checked independently of the server that stores the data
   ([security model](security.md)).

@@ -15387,6 +15387,522 @@
           ]
         }
       ]
+    },
+    {
+      "name": "checkpoint-leaves-name-a-section-twice",
+      "reason": "bad_checkpoint",
+      "failSeq": 5,
+      "note": "a checkpoint holds at most one leaf per section, even under a valid signature",
+      "log": [
+        {
+          "entry": {
+            "vaultId": "0192f5a3-0000-7aaa-8bbb-0123456789ab",
+            "seq": 1,
+            "kind": "vault_created",
+            "subjectUserId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e",
+            "role": "owner",
+            "keyVersion": 1,
+            "subjectKeys": "8531bd1439be6b680f509e26088cb811762da4845d26a0e7654e9b54a49a0850",
+            "subjectKeyVersion": 1,
+            "keyCommitment": "96987e0d50bed9a8248b4b452063b2abb2cda29e3d2c081af5c3de6978e10ff9",
+            "requestEnd": 1,
+            "authorUserId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e",
+            "authorKeyVersion": 1
+          },
+          "previousHash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "fields": [
+            {
+              "type": "label",
+              "value": "cloak/v1/vault-log"
+            },
+            {
+              "type": "uuid",
+              "value": "0192f5a3-0000-7aaa-8bbb-0123456789ab"
+            },
+            {
+              "type": "u64",
+              "value": "1"
+            },
+            {
+              "type": "digest32",
+              "value": "0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            {
+              "type": "u8",
+              "value": 1
+            },
+            {
+              "type": "uuid",
+              "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e"
+            },
+            {
+              "type": "u8",
+              "value": 4
+            },
+            {
+              "type": "u32",
+              "value": 1
+            },
+            {
+              "type": "digest32",
+              "value": "8531bd1439be6b680f509e26088cb811762da4845d26a0e7654e9b54a49a0850"
+            },
+            {
+              "type": "u32",
+              "value": 1
+            },
+            {
+              "type": "digest32",
+              "value": "96987e0d50bed9a8248b4b452063b2abb2cda29e3d2c081af5c3de6978e10ff9"
+            },
+            {
+              "type": "digest32",
+              "value": "0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            {
+              "type": "flag",
+              "value": 1
+            },
+            {
+              "type": "uuid",
+              "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e"
+            },
+            {
+              "type": "u32",
+              "value": 1
+            },
+            {
+              "type": "uuid",
+              "value": "00000000-0000-0000-0000-000000000000"
+            },
+            {
+              "type": "uuid",
+              "value": "00000000-0000-0000-0000-000000000000"
+            },
+            {
+              "type": "str",
+              "value": ""
+            },
+            {
+              "type": "str",
+              "value": ""
+            }
+          ],
+          "message": "0012636c6f616b2f76312f7661756c742d6c6f670192f5a300007aaa8bbb0123456789ab00000000000000010000000000000000000000000000000000000000000000000000000000000000010192f5a47c3e7b1a9d2e5f6a7b8c9d0e04000000018531bd1439be6b680f509e26088cb811762da4845d26a0e7654e9b54a49a08500000000196987e0d50bed9a8248b4b452063b2abb2cda29e3d2c081af5c3de6978e10ff90000000000000000000000000000000000000000000000000000000000000000010192f5a47c3e7b1a9d2e5f6a7b8c9d0e00000001000000000000000000000000000000000000000000000000000000000000000000000000",
+          "entryHash": "4c67e56caf5f4841b640370f253f54ec1fbb66b6245dbcad263ca2a786bfbcfd",
+          "signature": "01133eba92b19a029f6a5391525a14d040adc051eb15a2dc326c0de9b163679564505c8d94d416c3eacc8d8933cdd0b129480de0943f7548894604815a4fe65a0c"
+        },
+        {
+          "entry": {
+            "vaultId": "0192f5a3-0000-7aaa-8bbb-0123456789ab",
+            "seq": 2,
+            "kind": "node_created",
+            "keyVersion": 1,
+            "requestEnd": 1,
+            "authorUserId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e",
+            "authorKeyVersion": 1,
+            "nodeId": "afdd515a-cdcf-5c88-8cb2-66e7b6db2dd9",
+            "nodeKey": "server-1"
+          },
+          "previousHash": "4c67e56caf5f4841b640370f253f54ec1fbb66b6245dbcad263ca2a786bfbcfd",
+          "fields": [
+            {
+              "type": "label",
+              "value": "cloak/v1/vault-log"
+            },
+            {
+              "type": "uuid",
+              "value": "0192f5a3-0000-7aaa-8bbb-0123456789ab"
+            },
+            {
+              "type": "u64",
+              "value": "2"
+            },
+            {
+              "type": "digest32",
+              "value": "4c67e56caf5f4841b640370f253f54ec1fbb66b6245dbcad263ca2a786bfbcfd"
+            },
+            {
+              "type": "u8",
+              "value": 7
+            },
+            {
+              "type": "uuid",
+              "value": "00000000-0000-0000-0000-000000000000"
+            },
+            {
+              "type": "u8",
+              "value": 0
+            },
+            {
+              "type": "u32",
+              "value": 1
+            },
+            {
+              "type": "digest32",
+              "value": "0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            {
+              "type": "u32",
+              "value": 0
+            },
+            {
+              "type": "digest32",
+              "value": "0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            {
+              "type": "digest32",
+              "value": "0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            {
+              "type": "flag",
+              "value": 1
+            },
+            {
+              "type": "uuid",
+              "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e"
+            },
+            {
+              "type": "u32",
+              "value": 1
+            },
+            {
+              "type": "uuid",
+              "value": "afdd515a-cdcf-5c88-8cb2-66e7b6db2dd9"
+            },
+            {
+              "type": "uuid",
+              "value": "00000000-0000-0000-0000-000000000000"
+            },
+            {
+              "type": "str",
+              "value": "server-1"
+            },
+            {
+              "type": "str",
+              "value": ""
+            }
+          ],
+          "message": "0012636c6f616b2f76312f7661756c742d6c6f670192f5a300007aaa8bbb0123456789ab00000000000000024c67e56caf5f4841b640370f253f54ec1fbb66b6245dbcad263ca2a786bfbcfd0700000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010192f5a47c3e7b1a9d2e5f6a7b8c9d0e00000001afdd515acdcf5c888cb266e7b6db2dd90000000000000000000000000000000000087365727665722d310000",
+          "entryHash": "5fd82d78f53d970c6de45d1e196baab52e3d795ec88cfecc5f8399d1577e1479",
+          "signature": "018491459cc7bbef7131073f1635653f06c39c78ec104a8163cfb614fdcc6a6987eab2931ac4b86d327e9c43f820e79e967da945825623093185099d58a31af609"
+        },
+        {
+          "entry": {
+            "vaultId": "0192f5a3-0000-7aaa-8bbb-0123456789ab",
+            "seq": 3,
+            "kind": "member_added",
+            "subjectUserId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d1f",
+            "role": "editor",
+            "keyVersion": 1,
+            "subjectKeys": "079c1ccaea95b270cc5b7628800434cc9dbdee6a6f35f1ba5f9086c1c532f3ce",
+            "subjectKeyVersion": 1,
+            "requestEnd": 1,
+            "authorUserId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e",
+            "authorKeyVersion": 1
+          },
+          "previousHash": "5fd82d78f53d970c6de45d1e196baab52e3d795ec88cfecc5f8399d1577e1479",
+          "fields": [
+            {
+              "type": "label",
+              "value": "cloak/v1/vault-log"
+            },
+            {
+              "type": "uuid",
+              "value": "0192f5a3-0000-7aaa-8bbb-0123456789ab"
+            },
+            {
+              "type": "u64",
+              "value": "3"
+            },
+            {
+              "type": "digest32",
+              "value": "5fd82d78f53d970c6de45d1e196baab52e3d795ec88cfecc5f8399d1577e1479"
+            },
+            {
+              "type": "u8",
+              "value": 2
+            },
+            {
+              "type": "uuid",
+              "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d1f"
+            },
+            {
+              "type": "u8",
+              "value": 2
+            },
+            {
+              "type": "u32",
+              "value": 1
+            },
+            {
+              "type": "digest32",
+              "value": "079c1ccaea95b270cc5b7628800434cc9dbdee6a6f35f1ba5f9086c1c532f3ce"
+            },
+            {
+              "type": "u32",
+              "value": 1
+            },
+            {
+              "type": "digest32",
+              "value": "0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            {
+              "type": "digest32",
+              "value": "0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            {
+              "type": "flag",
+              "value": 1
+            },
+            {
+              "type": "uuid",
+              "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e"
+            },
+            {
+              "type": "u32",
+              "value": 1
+            },
+            {
+              "type": "uuid",
+              "value": "00000000-0000-0000-0000-000000000000"
+            },
+            {
+              "type": "uuid",
+              "value": "00000000-0000-0000-0000-000000000000"
+            },
+            {
+              "type": "str",
+              "value": ""
+            },
+            {
+              "type": "str",
+              "value": ""
+            }
+          ],
+          "message": "0012636c6f616b2f76312f7661756c742d6c6f670192f5a300007aaa8bbb0123456789ab00000000000000035fd82d78f53d970c6de45d1e196baab52e3d795ec88cfecc5f8399d1577e1479020192f5a47c3e7b1a9d2e5f6a7b8c9d1f0200000001079c1ccaea95b270cc5b7628800434cc9dbdee6a6f35f1ba5f9086c1c532f3ce0000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010192f5a47c3e7b1a9d2e5f6a7b8c9d0e00000001000000000000000000000000000000000000000000000000000000000000000000000000",
+          "entryHash": "028675eda5fc44489a3f3a474dd743aa577157cbdd96e92ee65fbaa34395a59d",
+          "signature": "01a246b04c2ff2a7829f0ea250a9c7ba26225194ad6c471eca09bee583613d08c6e47c119b8fb0a1fe021d50dc324402c3e79934f538fb233ff8241dfe9b16d20a"
+        },
+        {
+          "entry": {
+            "vaultId": "0192f5a3-0000-7aaa-8bbb-0123456789ab",
+            "seq": 4,
+            "kind": "member_added",
+            "subjectUserId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d2a",
+            "role": "viewer",
+            "keyVersion": 1,
+            "subjectKeys": "e06251318400f3504a65506235a5c0be2fc0b989c8ba431a08a9cb7ae36b733a",
+            "subjectKeyVersion": 1,
+            "requestEnd": 1,
+            "authorUserId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e",
+            "authorKeyVersion": 1
+          },
+          "previousHash": "028675eda5fc44489a3f3a474dd743aa577157cbdd96e92ee65fbaa34395a59d",
+          "fields": [
+            {
+              "type": "label",
+              "value": "cloak/v1/vault-log"
+            },
+            {
+              "type": "uuid",
+              "value": "0192f5a3-0000-7aaa-8bbb-0123456789ab"
+            },
+            {
+              "type": "u64",
+              "value": "4"
+            },
+            {
+              "type": "digest32",
+              "value": "028675eda5fc44489a3f3a474dd743aa577157cbdd96e92ee65fbaa34395a59d"
+            },
+            {
+              "type": "u8",
+              "value": 2
+            },
+            {
+              "type": "uuid",
+              "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d2a"
+            },
+            {
+              "type": "u8",
+              "value": 1
+            },
+            {
+              "type": "u32",
+              "value": 1
+            },
+            {
+              "type": "digest32",
+              "value": "e06251318400f3504a65506235a5c0be2fc0b989c8ba431a08a9cb7ae36b733a"
+            },
+            {
+              "type": "u32",
+              "value": 1
+            },
+            {
+              "type": "digest32",
+              "value": "0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            {
+              "type": "digest32",
+              "value": "0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            {
+              "type": "flag",
+              "value": 1
+            },
+            {
+              "type": "uuid",
+              "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e"
+            },
+            {
+              "type": "u32",
+              "value": 1
+            },
+            {
+              "type": "uuid",
+              "value": "00000000-0000-0000-0000-000000000000"
+            },
+            {
+              "type": "uuid",
+              "value": "00000000-0000-0000-0000-000000000000"
+            },
+            {
+              "type": "str",
+              "value": ""
+            },
+            {
+              "type": "str",
+              "value": ""
+            }
+          ],
+          "message": "0012636c6f616b2f76312f7661756c742d6c6f670192f5a300007aaa8bbb0123456789ab0000000000000004028675eda5fc44489a3f3a474dd743aa577157cbdd96e92ee65fbaa34395a59d020192f5a47c3e7b1a9d2e5f6a7b8c9d2a0100000001e06251318400f3504a65506235a5c0be2fc0b989c8ba431a08a9cb7ae36b733a0000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010192f5a47c3e7b1a9d2e5f6a7b8c9d0e00000001000000000000000000000000000000000000000000000000000000000000000000000000",
+          "entryHash": "905a962500f596a80fc4fd720b27c23543ba75bf130d4bb8610361558dde9b48",
+          "signature": "01cb9d64b0d24956fa0928222a43b1571b47691650e7bbb4757703e655cb33b90329ca399cde794779dc5a490c6f9d3376f3f29da019cbd0806feacaafa01bd403"
+        },
+        {
+          "entry": {
+            "vaultId": "0192f5a3-0000-7aaa-8bbb-0123456789ab",
+            "seq": 5,
+            "kind": "member_role_set",
+            "subjectUserId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d1f",
+            "role": "viewer",
+            "keyVersion": 1,
+            "subjectKeys": "079c1ccaea95b270cc5b7628800434cc9dbdee6a6f35f1ba5f9086c1c532f3ce",
+            "subjectKeyVersion": 1,
+            "checkpoint": "3b19dc1f2014f3d2fc4f234016c7ca33ec47827c25e88c4d3ccb95f4f29ccd87",
+            "requestEnd": 1,
+            "authorUserId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e",
+            "authorKeyVersion": 1
+          },
+          "previousHash": "905a962500f596a80fc4fd720b27c23543ba75bf130d4bb8610361558dde9b48",
+          "fields": [
+            {
+              "type": "label",
+              "value": "cloak/v1/vault-log"
+            },
+            {
+              "type": "uuid",
+              "value": "0192f5a3-0000-7aaa-8bbb-0123456789ab"
+            },
+            {
+              "type": "u64",
+              "value": "5"
+            },
+            {
+              "type": "digest32",
+              "value": "905a962500f596a80fc4fd720b27c23543ba75bf130d4bb8610361558dde9b48"
+            },
+            {
+              "type": "u8",
+              "value": 3
+            },
+            {
+              "type": "uuid",
+              "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d1f"
+            },
+            {
+              "type": "u8",
+              "value": 1
+            },
+            {
+              "type": "u32",
+              "value": 1
+            },
+            {
+              "type": "digest32",
+              "value": "079c1ccaea95b270cc5b7628800434cc9dbdee6a6f35f1ba5f9086c1c532f3ce"
+            },
+            {
+              "type": "u32",
+              "value": 1
+            },
+            {
+              "type": "digest32",
+              "value": "0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            {
+              "type": "digest32",
+              "value": "3b19dc1f2014f3d2fc4f234016c7ca33ec47827c25e88c4d3ccb95f4f29ccd87"
+            },
+            {
+              "type": "flag",
+              "value": 1
+            },
+            {
+              "type": "uuid",
+              "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e"
+            },
+            {
+              "type": "u32",
+              "value": 1
+            },
+            {
+              "type": "uuid",
+              "value": "00000000-0000-0000-0000-000000000000"
+            },
+            {
+              "type": "uuid",
+              "value": "00000000-0000-0000-0000-000000000000"
+            },
+            {
+              "type": "str",
+              "value": ""
+            },
+            {
+              "type": "str",
+              "value": ""
+            }
+          ],
+          "message": "0012636c6f616b2f76312f7661756c742d6c6f670192f5a300007aaa8bbb0123456789ab0000000000000005905a962500f596a80fc4fd720b27c23543ba75bf130d4bb8610361558dde9b48030192f5a47c3e7b1a9d2e5f6a7b8c9d1f0100000001079c1ccaea95b270cc5b7628800434cc9dbdee6a6f35f1ba5f9086c1c532f3ce0000000100000000000000000000000000000000000000000000000000000000000000003b19dc1f2014f3d2fc4f234016c7ca33ec47827c25e88c4d3ccb95f4f29ccd87010192f5a47c3e7b1a9d2e5f6a7b8c9d0e00000001000000000000000000000000000000000000000000000000000000000000000000000000",
+          "entryHash": "b87538eccef587e301b92ee28106b701ce08175fd1cc5ec8b268465189f9ae35",
+          "signature": "01db8b93c32c0b2a9a46ad38bae357b66e9c32f2839edce7457a0a6f92890d225b6fa8b989402a9e4c7c4019fac74a633851bb56114dfe8a0f65e32c66cc50de08",
+          "checkpointLeaves": [
+            {
+              "nodeId": "afdd515a-cdcf-5c88-8cb2-66e7b6db2dd9",
+              "sectionName": "general",
+              "dataVersion": 2,
+              "writeHash": "8ec1d3e900eaccca9ecf8f3d38112a2e6b50bbedef8eb91a4472ccc196839974",
+              "leafData": "afdd515acdcf5c888cb266e7b6db2dd9000767656e6572616c00000000000000028ec1d3e900eaccca9ecf8f3d38112a2e6b50bbedef8eb91a4472ccc196839974"
+            },
+            {
+              "nodeId": "afdd515a-cdcf-5c88-8cb2-66e7b6db2dd9",
+              "sectionName": "general",
+              "dataVersion": 2,
+              "writeHash": "8ec1d3e900eaccca9ecf8f3d38112a2e6b50bbedef8eb91a4472ccc196839974",
+              "leafData": "afdd515acdcf5c888cb266e7b6db2dd9000767656e6572616c00000000000000028ec1d3e900eaccca9ecf8f3d38112a2e6b50bbedef8eb91a4472ccc196839974"
+            },
+            {
+              "nodeId": "afdd515a-cdcf-5c88-8cb2-66e7b6db2dd9",
+              "sectionName": "secrets",
+              "dataVersion": 1,
+              "writeHash": "93eaa8e61c282593d46b3c8e80626801dde483bef2874a27e03d8d81376450ad",
+              "leafData": "afdd515acdcf5c888cb266e7b6db2dd9000773656372657473000000000000000193eaa8e61c282593d46b3c8e80626801dde483bef2874a27e03d8d81376450ad"
+            }
+          ]
+        }
+      ]
     }
   ],
   "enumerations": {

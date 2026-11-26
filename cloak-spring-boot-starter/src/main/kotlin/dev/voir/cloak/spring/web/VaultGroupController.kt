@@ -8,6 +8,7 @@ import dev.voir.cloak.api.models.WritePauseRequest
 import dev.voir.cloak.server.CloakServer
 import dev.voir.cloak.server.identity.domain.UserId
 import dev.voir.cloak.spring.web.mapping.Wire
+import dev.voir.cloak.spring.web.mapping.toAcceptance
 import dev.voir.cloak.spring.web.mapping.toApi
 import dev.voir.cloak.spring.web.mapping.toCore
 import jakarta.servlet.http.HttpServletRequest
@@ -43,12 +44,12 @@ internal class VaultGroupController(
     fun pause(request: HttpServletRequest, @RequestBody body: WritePauseRequest): WritePause =
         WritePause(Wire.instant(cloak.members.pauseWrites(callers.require(request), body.toCore())))
 
-    /** `POST /invitations/acceptance`: the caller accepts every vault one person adds them to. */
+    /** `POST /invitations/acceptance`: the caller accepts every vault one person adds them to, signed. */
     @PostMapping("/invitations/acceptance")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     @CloakOperation("acceptInviter")
     fun acceptInviter(request: HttpServletRequest, @RequestBody body: AcceptInviterRequest) {
-        cloak.members.acceptInviter(callers.require(request), UserId(Wire.uuid(body.inviterUserId)))
+        cloak.members.acceptInviter(callers.require(request), UserId(Wire.uuid(body.inviterUserId)), body.toAcceptance())
     }
 
     /** `POST /write-pauses/release`. */

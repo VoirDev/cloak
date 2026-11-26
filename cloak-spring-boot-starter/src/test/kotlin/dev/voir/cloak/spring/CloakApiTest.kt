@@ -74,6 +74,7 @@ class CloakApiTest {
 
         assertEquals(1000, meta["limits"]["maxMembersPerVault"].asInt())
         assertEquals(1000, meta["limits"]["maxIndexPageSize"].asInt())
+        assertEquals(8 * 1_048_576, meta["limits"]["maxPageBytes"].asInt())
         assertEquals(100_000, meta["limits"]["maxSectionsPerVault"].asInt())
         assertEquals(401, problem.status)
         assertEquals("unauthenticated", problem.code)
@@ -115,7 +116,7 @@ class CloakApiTest {
         addMember(alice, vault, carol, Role.VIEWER)
         assertEquals("role_required", addMember(bob, vault, registered(), Role.VIEWER).code)
         assertEquals(listOf(vault.value.toString()), api.call(GET, "/vaults?pending=true", bob)["items"].elements().map { it["id"].asString() })
-        assertEquals(204, api.call(PUT, "/vaults/${vault.value}/acceptance", bob).status)
+        assertEquals(204, api.call(PUT, "/vaults/${vault.value}/acceptance", bob, CloakApi.acceptance(bob.vaultAcceptance(vault))).status)
         assertEquals(listOf(vault.value.toString()), api.call(GET, "/vaults", bob)["items"].elements().map { it["id"].asString() })
 
         val node = node(alice, vault)
@@ -278,6 +279,46 @@ class CloakApiTest {
     }
 
     @Test
+    fun `reads that carry ciphertext page within one budget, and their cursors cover everything once`() {
+        val alice = registered()
+        val vault = createVault(alice)
+        val large = node(alice, vault)
+        val small = node(alice, vault)
+        val names = (1..9).map { "large_$it" }
+        names.forEach { assertEquals(200, write(alice, vault, large, it, blocks = LARGEST_BLOCKS).status) }
+        write(alice, vault, small, "general")
+        val budget = api.call(GET, "/meta")["limits"]["maxPageBytes"].asInt()
+        fun bytesOf(sections: tools.jackson.databind.JsonNode) = sections.elements().sumOf { bytes(it["ciphertext"].asString()).size }
+
+        val first = api.call(GET, "/nodes/${large.value}", alice)
+        val cursor = first["nextCursor"].asString()
+        val second = api.call(GET, "/nodes/${large.value}?cursor=$cursor", alice)
+        assertTrue(bytesOf(first["sections"]) <= budget)
+        assertNull(second.body?.get("nextCursor"))
+        assertEquals(names, (first["sections"].elements() + second["sections"].elements()).map { it["sectionName"].asString() })
+        assertEquals("validation_failed", api.call(GET, "/nodes/${small.value}?cursor=$cursor", alice).code)
+
+        val missing = Uuid.random().toString()
+        val ids = listOf(large, small).map { it.value.toString() }.sorted()
+        val batch = api.call(POST, "/nodes/batch-get", alice, mapOf("nodeIds" to ids + missing))
+        assertEquals(200, batch.status)
+        assertTrue(batch["items"].elements().sumOf { bytesOf(it["sections"]) } <= budget)
+        // Nodes fill the budget in id order; the larger node either carries a cursor or is left unread.
+        val reached = batch["items"].elements().associateBy { it["nodeId"].asString() }
+        val unread = batch["unreadNodeIds"].elements().map { it.asString() }
+        assertTrue(reached.values.any { it.has("nextCursor") } || unread.isNotEmpty())
+        assertEquals((ids + missing).toSet(), reached.keys + unread + batch["missingNodeIds"].elements().map { it.asString() })
+
+        val feed = generateSequence(api.call(GET, "/vaults/${vault.value}/sections?limit=100", alice)) { page ->
+            page.takeIf { it["throughChangeSeq"].asLong() < it["lastChangeSeq"].asLong() }
+                ?.let { api.call(GET, "/vaults/${vault.value}/sections?limit=100&afterChange=${it["throughChangeSeq"].asLong()}", alice) }
+        }.toList()
+        assertTrue(feed.size >= 2)
+        feed.forEach { assertTrue(bytesOf(it["items"]) <= budget) }
+        assertEquals(names + "general", feed.flatMap { page -> page["items"].elements().map { it["sectionName"].asString() } })
+    }
+
+    @Test
     fun `failures are problems with stable codes and pointers`() {
         val alice = registered()
         val vault = createVault(alice)
@@ -309,6 +350,79 @@ class CloakApiTest {
         val planted = write(alice, createVault(alice), node, "general")
         assertEquals("not_shared", planted["errors"][0]["code"].asString())
         assertEquals("/nodeId", planted["errors"][0]["pointer"].asString())
+    }
+
+    @Test
+    fun `a body is read as strictly as the contract types it`() {
+        val alice = registered()
+        val vault = createVault(alice)
+        val node = node(alice, vault)
+        val (input, _) = signedWrite(alice, vault, node, "general")
+        val valid = CloakApi.write(input)
+        val path = "/vaults/${vault.value}/sections/${node.value}/general"
+        val mistyped = listOf(
+            "/dataVersion" to input.dataVersion.toString(),
+            "/dataVersion" to input.dataVersion + 0.9,
+            "/deleted" to "false",
+            "/deleted" to 0,
+            "/nodeType" to 7,
+            "/nodeType" to 7.5,
+            "/nodeType" to true,
+        )
+
+        for ((pointer, value) in mistyped) {
+            val response = api.call(PUT, path, alice, valid + (pointer.removePrefix("/") to value))
+            assertEquals(400, response.status, "$pointer = $value")
+            assertEquals("validation_failed", response.code, "$pointer = $value")
+            assertEquals(pointer, response["errors"][0]["pointer"].asString(), "$pointer = $value")
+            assertEquals("schema", response["errors"][0]["code"].asString(), "$pointer = $value")
+        }
+        val repeated = "{\"dataVersion\":${input.dataVersion}," + mapper.writeValueAsString(valid).removePrefix("{")
+        val duplicate = api.call(PUT, path, alice, repeated)
+        assertEquals(400, duplicate.status)
+        assertEquals("validation_failed", duplicate.code)
+        assertEquals(200, api.call(PUT, path, alice, valid + ("unknown" to true)).status)
+    }
+
+    @Test
+    fun `path ids are taken only in their canonical lowercase hyphenated form`() {
+        val alice = registered()
+        val vault = createVault(alice)
+        val node = node(alice, vault)
+        write(alice, vault, node, "general")
+        val spellings = { id: Uuid -> listOf(id.toString().uppercase(), id.toString().replace("-", "")) }
+
+        assertEquals(200, api.call(GET, "/vaults/${vault.value}", alice).status)
+        assertEquals(200, api.call(GET, "/nodes/${node.value}", alice).status)
+        assertEquals(200, api.call(GET, "/users/${alice.id.value}/keys", alice).status)
+        val refused = spellings(vault.value).map { "/vaults/$it" } +
+            spellings(node.value).map { "/nodes/$it" } +
+            spellings(alice.id.value).map { "/users/$it/keys" }
+        for (path in refused) {
+            val response = api.call(GET, path, alice)
+            assertEquals(404, response.status, path)
+            assertEquals("not_found", response.code, path)
+        }
+    }
+
+    @Test
+    fun `body ids are taken only in their canonical lowercase hyphenated form`() {
+        val alice = registered()
+        val vault = createVault(alice)
+        val node = node(alice, vault)
+        write(alice, vault, node, "general")
+        val asked = { vaultId: Any, nodeId: Any -> mapOf("sections" to listOf(mapOf("vaultId" to vaultId, "nodeId" to nodeId, "sectionName" to "general"))) }
+
+        assertEquals(200, api.call(POST, "/nodes/batch-get", alice, mapOf("nodeIds" to listOf(node.value.toString()))).status)
+        assertEquals(1, api.call(POST, "/section-headers/batch-get", alice, asked(vault.value.toString(), node.value.toString()))["items"].size())
+        for (spelling in otherSpellings(node.value) + listOf(42)) {
+            val nodes = api.call(POST, "/nodes/batch-get", alice, mapOf("nodeIds" to listOf(spelling)))
+            assertEquals("validation_failed", nodes.code, "$spelling")
+            assertEquals("/nodeIds/0", nodes["errors"][0]["pointer"].asString(), "$spelling")
+            val headers = api.call(POST, "/section-headers/batch-get", alice, asked(vault.value.toString(), spelling))
+            assertEquals("validation_failed", headers.code, "$spelling")
+            assertEquals("/sections/0/nodeId", headers["errors"][0]["pointer"].asString(), "$spelling")
+        }
     }
 
     @Test
@@ -368,16 +482,28 @@ class CloakApiTest {
 
         val pending = api.call(GET, "/vaults/${first.value}", bob)
         assertFalse(pending["accepted"].asBoolean())
+        assertFalse(checkNotNull(pending.body).has("acceptance"))
         assertEquals(alice.id.value.toString(), pending["addedByUserId"].asString())
         assertEquals(0, api.call(GET, "/vaults", bob)["items"].size())
         assertEquals(1, api.call(GET, "/vaults?pending=true", bob)["items"].size())
         assertEquals("validation_failed", api.call(GET, "/vaults?pending=maybe", bob).code)
 
-        assertEquals(204, api.call(PUT, "/vaults/${first.value}/acceptance", bob).status)
+        val forged = CloakApi.acceptance(bob.vaultAcceptance(second))
+        assertEquals("bad_signature", api.call(PUT, "/vaults/${first.value}/acceptance", bob, forged).code)
+        assertEquals(204, api.call(PUT, "/vaults/${first.value}/acceptance", bob, CloakApi.acceptance(bob.vaultAcceptance(first))).status)
         assertEquals(1, api.call(GET, "/vaults", bob)["items"].size())
-        assertEquals(204, api.call(POST, "/invitations/acceptance", bob, mapOf("inviterUserId" to alice.id.value.toString())).status)
+        val own = api.call(GET, "/vaults/${first.value}", bob)["acceptance"]
+        assertEquals(1, own["keyVersion"].asInt())
+        assertEquals(b64(bob.vaultAcceptance(first).signature), own["signature"].asString())
+        assertNull(own["inviterUserId"])
+        val inviter = bob.inviterAcceptance(alice.id)
+        val acceptInviter = mapOf("inviterUserId" to alice.id.value.toString()) + CloakApi.acceptance(inviter)
+        assertEquals(204, api.call(POST, "/invitations/acceptance", bob, acceptInviter).status)
         addMember(alice, second, bob, Role.VIEWER)
-        assertTrue(api.call(GET, "/vaults/${second.value}", bob)["accepted"].asBoolean())
+        val later = api.call(GET, "/vaults/${second.value}", bob)
+        assertTrue(later["accepted"].asBoolean())
+        assertEquals(alice.id.value.toString(), later["acceptance"]["inviterUserId"].asString())
+        assertEquals(b64(inviter.signature), later["acceptance"]["signature"].asString())
         assertEquals(1000, api.call(GET, "/meta")["limits"]["maxPendingInvitations"].asInt())
     }
 
@@ -457,7 +583,13 @@ class CloakApiTest {
     private fun createVault(owner: TestClient): VaultId {
         val id = VaultId(Uuid.random())
         val (log, _) = TestProtocol.logEntry(owner, id, 1, null, LogEntryKind.VAULT_CREATED, owner.keys, Role.OWNER, 1, keyCommitment = TestBlobs.random(32))
-        val created = api.call(POST, "/vaults", owner, mapOf("id" to id.value.toString(), "keyEnvelope" to b64(TestBlobs.envelope()), "log" to CloakApi.log(log)))
+        val created = api.call(
+            POST, "/vaults", owner,
+            mapOf(
+                "id" to id.value.toString(), "keyEnvelope" to b64(TestBlobs.envelope()), "log" to CloakApi.log(log),
+                "acceptance" to CloakApi.acceptance(owner.vaultAcceptance(id)),
+            ),
+        )
         check(created.status == 201) { "create failed: ${created.body}" }
         return id
     }
@@ -475,25 +607,38 @@ class CloakApiTest {
     }
 
     /** Signs the next write of a section against what the server shows. */
-    private fun signedWrite(writer: TestClient, vault: VaultId, node: NodeId, name: String, deleted: Boolean = false, dataVersion: Long? = null) =
+    private fun signedWrite(writer: TestClient, vault: VaultId, node: NodeId, name: String, deleted: Boolean = false, dataVersion: Long? = null, blocks: Int = 1) =
         head(writer, vault).let { (seq, hash, keyVersion) ->
             val latest = api.call(GET, "/vaults/${vault.value}/sections/${node.value}/$name", writer).takeIf { it.status == 200 }
             TestProtocol.sectionWrite(
                 writer, SectionRef(vault, node, SectionName(name)), NodeType("compute.vps"), keyVersion,
                 dataVersion ?: ((latest?.get("dataVersion")?.asLong() ?: 0) + 1), seq, hash,
-                latest?.get("writeHash")?.asString()?.let(::bytes), if (deleted) null else TestBlobs.ciphertext(), origins.getValue(node),
+                latest?.get("writeHash")?.asString()?.let(::bytes), if (deleted) null else TestBlobs.ciphertext(blocks), origins.getValue(node),
             )
         }
 
     /** Writes the next version of a section. */
-    private fun write(writer: TestClient, vault: VaultId, node: NodeId, name: String, dataVersion: Long? = null): CloakApi.Response {
-        val (input, _) = signedWrite(writer, vault, node, name, dataVersion = dataVersion)
+    private fun write(writer: TestClient, vault: VaultId, node: NodeId, name: String, dataVersion: Long? = null, blocks: Int = 1): CloakApi.Response {
+        val (input, _) = signedWrite(writer, vault, node, name, dataVersion = dataVersion, blocks = blocks)
         return api.call(PUT, "/vaults/${vault.value}/sections/${node.value}/$name", writer, CloakApi.write(input))
     }
 
     /** One batch item. */
     private fun item(vault: VaultId, node: NodeId, name: String, input: dev.voir.cloak.server.section.domain.SectionWriteInput) =
         CloakApi.write(input) + mapOf("vaultId" to vault.value.toString(), "nodeId" to node.value.toString(), "sectionName" to name)
+
+    private companion object {
+        /** Padding blocks of the largest section: 41 + 256 × 4095 bytes, just under 1 MiB. */
+        const val LARGEST_BLOCKS = 4_095
+
+        /** Spellings of [id] Jackson or a lenient parser would take, which the contract does not. */
+        fun otherSpellings(id: Uuid): List<String> =
+            listOf(
+                id.toString().uppercase(),
+                id.toString().replace("-", ""),
+                java.util.Base64.getEncoder().encodeToString(id.toByteArray()),
+            )
+    }
 
     /** The elements of a JSON array. */
     private fun tools.jackson.databind.JsonNode.elements(): List<tools.jackson.databind.JsonNode> = iterator().asSequence().toList()

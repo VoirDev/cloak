@@ -95,12 +95,14 @@ public class SectionOperations internal constructor(
     }
 
     /**
-     * Lists a vault's sections by the change number of their latest write, deletions included.
+     * Lists a vault's sections by the change number of their latest write, deletions included. A
+     * page holds whole sections, at least one, up to [limit] of them and [Limits.MAX_PAGE_BYTES] of
+     * ciphertext; a page cut short by either ends at its last write's change number.
      *
      * @param caller Authenticated user; any member of the vault.
      * @param vaultId The vault.
      * @param afterChange Only sections whose latest write came after this change number; `null` for all.
-     * @param limit Page size.
+     * @param limit Most sections per page.
      * @return One page of writes and removals, the last change number it covers and the vault's latest.
      */
     public fun list(caller: UserId, vaultId: VaultId, afterChange: Long? = null, limit: Int = PageRequest.DEFAULT_LIMIT): SectionPage = context.operation("listVaultSections") {
@@ -109,10 +111,10 @@ public class SectionOperations internal constructor(
         asCaller(caller) {
             val (vault, _) = VaultAccess.readAsMember(caller, vaultId)
             val after = afterChange ?: 0
-            val writes = SectionRepository.pageByChange(vaultId, after, limit)
+            val read = SectionRepository.pageByChange(vaultId, after, limit)
             val removals = SectionRepository.removalsByChange(vaultId, after, limit)
-            val through = throughChange(vault.changeSeq, limit, writes.map { it.changeSeq }, removals)
-            SectionPage(writes.filter { it.changeSeq <= through }, removals.filter { it.changeSeq <= through }, through, vault.changeSeq)
+            val through = throughChange(vault.changeSeq, limit, read.next?.let { read.writes.last().changeSeq }, removals)
+            SectionPage(read.writes.filter { it.changeSeq <= through }, removals.filter { it.changeSeq <= through }, through, vault.changeSeq)
         }
     }
 
@@ -140,7 +142,7 @@ public class SectionOperations internal constructor(
             val after = afterChange ?: 0
             val headers = SectionRepository.headersByChange(vaultId, after, limit)
             val removals = SectionRepository.removalsByChange(vaultId, after, limit)
-            val through = throughChange(vault.changeSeq, limit, headers.map { it.changeSeq }, removals)
+            val through = throughChange(vault.changeSeq, limit, headers.takeIf { it.size >= limit }?.last()?.changeSeq, removals)
             SectionHeaderPage(headers.filter { it.changeSeq <= through }, removals.filter { it.changeSeq <= through }, through, vault.changeSeq)
         }
     }
@@ -357,14 +359,20 @@ public class SectionOperations internal constructor(
 }
 
 /**
- * The last change number a page covers: everything up to the vault's latest, unless the writes or
- * the removals filled their page, which then ends at the lower of their last change numbers, so no
- * change in between is skipped.
+ * The last change number a page covers: everything up to the vault's latest, unless the writes
+ * were cut short or the removals filled their page, which then ends at the lower of their last
+ * change numbers, so no change in between is skipped.
+ *
+ * @param latest The vault's latest change number.
+ * @param limit Page size.
+ * @param writesEnd Change number of the page's last write when more writes follow it; `null` otherwise.
+ * @param removals The removals read for the page.
+ * @return The page's last change number.
  */
-private fun throughChange(latest: Long, limit: Int, writes: List<Long>, removals: List<SectionRemoval>): Long =
+private fun throughChange(latest: Long, limit: Int, writesEnd: Long?, removals: List<SectionRemoval>): Long =
     minOf(
         latest,
-        writes.takeIf { it.size >= limit }?.last() ?: Long.MAX_VALUE,
+        writesEnd ?: Long.MAX_VALUE,
         removals.takeIf { it.size >= limit }?.last()?.changeSeq ?: Long.MAX_VALUE,
     )
 

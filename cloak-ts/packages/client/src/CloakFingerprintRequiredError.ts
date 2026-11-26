@@ -1,6 +1,7 @@
 /**
- * Adding a person this device has never met needs their fingerprint confirmed out of band first
- * (`PROTOCOL.md` §9): otherwise the server could hand over its own keys under their name. Compare
+ * Adding a person needs their keys vouched for (`PROTOCOL.md` §9): a fingerprint the user confirmed
+ * out of band, or a vault the user accepted that commits them. Otherwise the server could hand over
+ * its own keys under their name. Compare
  * {@link CloakFingerprintRequiredError.fingerprint} with the person, then call
  * `confirmFingerprint` and add them again.
  */

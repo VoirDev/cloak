@@ -30,6 +30,14 @@ fail() {
   exit 1
 }
 
+# Prints this repository's URL on GitHub with the token given in it, for the one git command that
+# uses it: Prepare Release's checkout keeps no credentials in .git/config. Reads GITHUB_SERVER_URL
+# and GITHUB_REPOSITORY, which Actions sets.
+authenticated_remote() {
+  : "${1:?a token}" "${GITHUB_SERVER_URL:?}" "${GITHUB_REPOSITORY:?}"
+  printf 'https://x-access-token:%s@%s/%s.git' "$1" "${GITHUB_SERVER_URL#https://}" "$GITHUB_REPOSITORY"
+}
+
 require_semver() {
   [[ "$1" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] ||
     fail "'$1' is not a MAJOR.MINOR.PATCH version."

@@ -1,4 +1,5 @@
 import { ed25519 } from '@noble/curves/ed25519.js';
+import { sha512 } from '@noble/hashes/sha2.js';
 
 import { CloakCryptoError } from './CloakCryptoError.ts';
 import { BLOB_FORMAT, SIGNATURE_BYTES } from './blobs.ts';
@@ -14,6 +15,12 @@ import { concatBytes } from './bytes.ts';
  */
 export type SignatureRefusal =
   'bad_signature' | 'non_canonical_signature' | 'non_canonical_key' | 'small_order_key';
+
+/**
+ * Why a public key is refused (`PROTOCOL.md` §2, §5.1): `non_canonical_key` for an encoding that is
+ * not canonical, `small_order_key` for a point of small order.
+ */
+export type KeyRefusal = 'non_canonical_key' | 'small_order_key';
 
 /** Order of the edwards25519 prime-order subgroup. */
 const GROUP_ORDER = 2n ** 252n + 27742317777372353535851937790883648493n;
@@ -72,15 +79,39 @@ export function checkSignature(
     return 'bad_signature';
   if (publicKey.length !== 32) return 'non_canonical_key';
   const raw = signature.subarray(1);
-  if (littleEndian(raw.subarray(32)) >= GROUP_ORDER) return 'non_canonical_signature';
-  if (yCoordinate(raw.subarray(0, 32)) >= FIELD_PRIME) return 'non_canonical_signature';
-  if (yCoordinate(publicKey) >= FIELD_PRIME) return 'non_canonical_key';
-  if (isSmallOrderKey(publicKey)) return 'small_order_key';
+  const encodedR = raw.subarray(0, 32);
+  const s = littleEndian(raw.subarray(32));
+  if (s >= GROUP_ORDER) return 'non_canonical_signature';
+  if (!isCanonicalPoint(encodedR)) return 'non_canonical_signature';
+  const keyRefusal = checkSigningKey(publicKey);
+  if (keyRefusal !== undefined) return keyRefusal;
+  // The cofactorless equation, [S]B - [k]A = R, compared as encodings (RFC 8032 §5.1.7, as
+  // OpenSSL and the JDK check it). A cofactored check would also accept an R or a key with a
+  // small-order part, which other implementations refuse.
+  let key;
   try {
-    return ed25519.verify(raw, message, publicKey, { zip215: false }) ? undefined : 'bad_signature';
+    key = ed25519.Point.fromBytes(publicKey, false);
   } catch {
     return 'bad_signature';
   }
+  const k = littleEndian(sha512(concatBytes(encodedR, publicKey, message))) % GROUP_ORDER;
+  const expected = ed25519.Point.BASE.multiplyUnsafe(s).subtract(key.multiplyUnsafe(k)).toBytes();
+  return equalEncodings(expected, encodedR) ? undefined : 'bad_signature';
+}
+
+/** Whether two 32-byte encodings are equal; both are public, so the comparison need not be constant-time. */
+function equalEncodings(a: Uint8Array, b: Uint8Array): boolean {
+  return a.length === b.length && a.every((byte, index) => byte === b[index]);
+}
+
+/**
+ * Whether a 32-byte edwards25519 encoding is canonical (`PROTOCOL.md` §2): `y` below the field
+ * prime, and no sign bit on a point whose `x` is 0, which only `y` = 1 and `y` = p − 1 have.
+ */
+function isCanonicalPoint(point: Uint8Array): boolean {
+  const y = yCoordinate(point);
+  const signed = ((point[31] ?? 0) & 0x80) !== 0;
+  return y < FIELD_PRIME && !(signed && (y === 1n || y === FIELD_PRIME - 1n));
 }
 
 /**
@@ -124,6 +155,18 @@ export function requireValidSignature(
 export function isSmallOrderKey(publicKey: Uint8Array): boolean {
   const encoded = Array.from(publicKey, (byte) => byte.toString(16).padStart(2, '0')).join('');
   return SMALL_ORDER_POINTS.includes(encoded);
+}
+
+/**
+ * Checks an Ed25519 public key as every verifier and the server do (`PROTOCOL.md` §2): 32 bytes,
+ * a canonical encoding, and not of small order.
+ *
+ * @param publicKey Raw Ed25519 public key.
+ * @returns `undefined` when usable, otherwise why it is refused.
+ */
+export function checkSigningKey(publicKey: Uint8Array): KeyRefusal | undefined {
+  if (publicKey.length !== 32 || !isCanonicalPoint(publicKey)) return 'non_canonical_key';
+  return isSmallOrderKey(publicKey) ? 'small_order_key' : undefined;
 }
 
 /** Reads bytes as a little-endian unsigned integer. */

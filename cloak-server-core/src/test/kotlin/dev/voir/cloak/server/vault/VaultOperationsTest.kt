@@ -46,7 +46,7 @@ class VaultOperationsTest {
         val other = VaultId(Uuid.random())
         val forBob = cloak.entry(alice, other, LogEntryKind.VAULT_CREATED, subject = bob, role = Role.OWNER, keyVersion = 1, keyCommitment = TestBlobs.random(32), seq = 1)
         assertCloakError(CloakErrorCode.LOG_REJECTED) {
-            cloak.server.vaults.create(alice.id, CreateVaultCommand(other, TestBlobs.envelope(), forBob))
+            cloak.server.vaults.create(alice.id, CreateVaultCommand(other, TestBlobs.envelope(), forBob, alice.vaultAcceptance(other)))
         }
     }
 
@@ -60,7 +60,7 @@ class VaultOperationsTest {
         assertCloakError(CloakErrorCode.NOT_FOUND) { cloak.server.vaults.log(bob.id, id) }
 
         cloak.addMember(alice, id, bob, Role.ADMIN)
-        cloak.server.members.accept(bob.id, id)
+        cloak.accept(bob, id)
         assertCloakError(CloakErrorCode.ROLE_REQUIRED) {
             cloak.server.vaults.delete(bob.id, id, cloak.entry(bob, id, LogEntryKind.VAULT_DELETED))
         }

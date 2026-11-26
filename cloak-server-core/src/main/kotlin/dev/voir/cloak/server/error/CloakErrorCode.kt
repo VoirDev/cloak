@@ -71,7 +71,10 @@ public enum class CloakErrorCode(
     /** Identity keys were replaced on another device, or a key version is superseded. */
     IDENTITY_VERSION_CONFLICT("identity_version_conflict", 409, "Identity version conflict"),
 
-    /** The caller is a member of a vault, so their identity cannot be deleted yet. */
+    /**
+     * The caller is an accepted member of a vault that is not deleted and has another member who is
+     * not deleted, so their identity cannot be deleted yet (`PROTOCOL.md` §5.7).
+     */
     IDENTITY_IN_VAULTS("identity_in_vaults", 409, "Identity in vaults"),
 
     /** Someone else's write pause holds the vault, and the caller may not replace it. */
@@ -86,10 +89,17 @@ public enum class CloakErrorCode(
     /** The body or a section is larger than the limit. */
     PAYLOAD_TOO_LARGE("payload_too_large", 413, "Payload too large"),
 
-    /** The host's request guard refused the request; see [CloakException.retryAfterSeconds]. */
+    /**
+     * The host's request guard refused the request, or a member who is not an admin paused a vault's
+     * writes again within [dev.voir.cloak.server.CloakSettings.writePauseInterval]; see
+     * [CloakException.retryAfterSeconds].
+     */
     RATE_LIMITED("rate_limited", 429, "Too many requests"),
 
-    /** The vault is busy or the request ran out of database time; see [CloakException.retryAfterSeconds]. */
+    /**
+     * The vault is busy, its section writes are paused for a checkpoint, or the request ran out of
+     * database time; see [CloakException.retryAfterSeconds].
+     */
     BUSY("busy", 503, "Busy"),
 
     /** Unexpected failure. Raised by adapters for any other exception. */

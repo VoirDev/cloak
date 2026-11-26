@@ -7,7 +7,7 @@ import {
 import { describe, expect, it } from 'vitest';
 
 import { createMemoryStorage, type CloakStorage } from '../src/storage/CloakStorage.ts';
-import { openLocalState } from '../src/storage/localState.ts';
+import { moveLocalState, openLocalState } from '../src/storage/localState.ts';
 
 const USER = '0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e';
 /** Another user whose id differs from {@link USER} only in its last character. */
@@ -36,6 +36,7 @@ function inspectableStorage(): CloakStorage & { readonly records: Map<string, Ui
       for (const key of [...records.keys()]) if (key.startsWith(prefix)) records.delete(key);
       return Promise.resolve();
     },
+    keys: (prefix) => Promise.resolve([...records.keys()].filter((key) => key.startsWith(prefix))),
   };
 }
 
@@ -44,7 +45,11 @@ describe('local state', () => {
     const storage = createMemoryStorage();
     const key = randomBytes(32);
     const first = openLocalState(storage, USER, key);
-    await first.setPin('bob', { keyVersion: 1, keysDigest: new Uint8Array(32).fill(7) });
+    await first.setPin('bob', {
+      keyVersion: 1,
+      keysDigest: new Uint8Array(32).fill(7),
+      vouched: false,
+    });
     await first.advanceHead('vault', { seq: 4, entryHash: new Uint8Array(32).fill(1) });
     await first.raiseMark(SECTION, { dataVersion: 3, writeHash: new Uint8Array(32).fill(2) });
     await first.setOwnWrite(SECTION, new Uint8Array(32).fill(3));
@@ -53,6 +58,7 @@ describe('local state', () => {
     expect(await second.pin('bob')).toEqual({
       keyVersion: 1,
       keysDigest: new Uint8Array(32).fill(7),
+      vouched: false,
     });
     expect((await second.head('vault'))?.seq).toBe(4);
     expect((await second.mark(SECTION))?.dataVersion).toBe(3);
@@ -117,14 +123,38 @@ describe('local state', () => {
     expect((await state.head(other.vaultId))?.seq).toBe(4);
   });
 
+  it('vouches only for the pin it was asked about, and keeps own acceptances', async () => {
+    const local = openLocalState(createMemoryStorage(), USER, randomBytes(32));
+    const digest = new Uint8Array(32).fill(7);
+    await local.setPin('bob', { keyVersion: 1, keysDigest: digest, vouched: false });
+
+    await local.vouch('bob', new Uint8Array(32).fill(8));
+    expect((await local.pin('bob'))?.vouched).toBe(false);
+    await local.vouch('bob', digest);
+    expect((await local.pin('bob'))?.vouched).toBe(true);
+    await local.vouch('nobody', digest);
+    expect(await local.pin('nobody')).toBeUndefined();
+
+    expect(await local.vouching('vault')).toBe(false);
+    await local.setVouching('vault', true);
+    expect(await local.vouching('vault')).toBe(true);
+    await local.forgetVault('vault', true);
+    expect(await local.vouching('vault')).toBe(false);
+
+    await local.addOwnAcceptance('vault', 'v1');
+    await local.addOwnAcceptance('vault', 'v1');
+    await local.addOwnAcceptance('inviter', 'carol');
+    expect(await local.ownAcceptances()).toEqual({ vaultIds: ['v1'], inviterUserIds: ['carol'] });
+  });
+
   it('clears every record of the user and none of another user', async () => {
     const storage = inspectableStorage();
     const mine = openLocalState(storage, USER, randomBytes(32));
     const theirs = openLocalState(storage, OTHER_USER, randomBytes(32));
-    await mine.setPin('bob', { keyVersion: 1, keysDigest: new Uint8Array(32) });
+    await mine.setPin('bob', { keyVersion: 1, keysDigest: new Uint8Array(32), vouched: false });
     await mine.setHostId('bob', 'bob@example.com');
     await mine.advanceHead('vault', { seq: 1, entryHash: new Uint8Array(32) });
-    await theirs.setPin('bob', { keyVersion: 1, keysDigest: new Uint8Array(32) });
+    await theirs.setPin('bob', { keyVersion: 1, keysDigest: new Uint8Array(32), vouched: false });
 
     await mine.clear();
 
@@ -150,16 +180,31 @@ describe('local state', () => {
     await openLocalState(storage, USER, oldKey).setPin('bob', {
       keyVersion: 2,
       keysDigest: new Uint8Array(32).fill(9),
+      vouched: false,
     });
 
-    const migrated = openLocalState(storage, USER, newKey, oldKey);
-    expect((await migrated.pin('bob'))?.keyVersion).toBe(2);
-
-    // Sealed again under the new key: it now opens without the previous one.
-    expect((await openLocalState(storage, USER, newKey).pin('bob'))?.keyVersion).toBe(2);
-    await expect(openLocalState(storage, USER, oldKey).pin('bob')).rejects.toMatchObject({
-      code: 'decryption_failed',
+    await openLocalState(storage, USER, oldKey).advanceHead(SECTION.vaultId, {
+      seq: 3,
+      entryHash: new Uint8Array(32).fill(3),
     });
+    await storage.set(`cloak/v1/${USER}/secret-key`, new Uint8Array(16).fill(1));
+    // Another user's record under the same store is not the user's to move.
+    await openLocalState(storage, OTHER_USER, oldKey).setHostId('bob', 'bob@example.com');
+
+    await moveLocalState(storage, USER, newKey, oldKey);
+
+    // Every record opens under the new key alone, read or not; the secret key stays as it was.
+    const moved = openLocalState(storage, USER, newKey);
+    expect((await moved.pin('bob'))?.keyVersion).toBe(2);
+    expect((await moved.head(SECTION.vaultId))?.seq).toBe(3);
+    expect(await storage.get(`cloak/v1/${USER}/secret-key`)).toEqual(new Uint8Array(16).fill(1));
+    expect(await openLocalState(storage, OTHER_USER, oldKey).hostId('bob')).toBe('bob@example.com');
+
+    // From then on the previous key opens nothing: a record put back sealed under it is refused,
+    // and moving again leaves it so.
+    await openLocalState(storage, USER, oldKey).setHostId('carol', 'carol@example.com');
+    await moveLocalState(storage, USER, newKey, oldKey);
+    await expect(moved.hostId('carol')).rejects.toMatchObject({ code: 'decryption_failed' });
   });
 
   it('keeps a vault snapshot whole, and never lowers it to a shorter one', async () => {

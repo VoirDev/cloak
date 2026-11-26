@@ -17,7 +17,9 @@ import kotlin.time.Instant
  * @property logHeadHash `entryHash` of the last log entry.
  * @property createdByUserId Creator.
  * @property createdAt Creation instant.
- * @property accepted Whether the caller accepted the vault (`PROTOCOL.md` §12.4); unsigned.
+ * @property accepted Whether the server lists the vault as accepted by the caller (`PROTOCOL.md` §12.4).
+ * @property acceptance The caller's signed acceptance (`PROTOCOL.md` §9): the vault's own, or else,
+ *   once accepted, the `inviterAcceptance` of who added them; `null` when there is neither.
  * @property addedByUserId Who added the caller, per the log; `null` for the vault's creator.
  * @property deleted Whether the log ends in `vault_deleted`: only the log and member list remain.
  */
@@ -40,8 +42,10 @@ public data class Vault(
     public val createdByUserId: UserId,
     /** Creation instant. */
     public val createdAt: Instant,
-    /** Whether the caller accepted the vault. */
+    /** Whether the server lists the vault as accepted by the caller. */
     public val accepted: Boolean = true,
+    /** The caller's signed acceptance. */
+    public val acceptance: VaultAcceptance? = null,
     /** Who added the caller. */
     public val addedByUserId: UserId? = null,
     /** Whether an owner deleted the vault. */

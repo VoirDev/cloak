@@ -14,7 +14,22 @@ import dev.voir.cloak.server.vault.domain.CheckpointLeaf
 import dev.voir.cloak.server.vault.domain.VaultId
 import dev.voir.cloak.server.vault.persistence.VaultMembersTable
 import dev.voir.cloak.server.vault.persistence.VaultsTable
+import dev.voir.cloak.server.meta.Limits
+import dev.voir.cloak.server.protocol.BlobRules
+import org.jetbrains.exposed.v1.core.Coalesce
+import org.jetbrains.exposed.v1.core.ColumnSet
+import org.jetbrains.exposed.v1.core.CustomFunction
+import org.jetbrains.exposed.v1.core.Expression
 import org.jetbrains.exposed.v1.core.JoinType
+import org.jetbrains.exposed.v1.core.LongColumnType
+import org.jetbrains.exposed.v1.core.Op
+import org.jetbrains.exposed.v1.core.Sum
+import org.jetbrains.exposed.v1.core.WindowFrameBound
+import org.jetbrains.exposed.v1.core.alias
+import org.jetbrains.exposed.v1.core.lessEq
+import org.jetbrains.exposed.v1.core.longLiteral
+import org.jetbrains.exposed.v1.core.or
+import org.jetbrains.exposed.v1.core.rowNumber
 import org.jetbrains.exposed.v1.core.ResultRow
 import org.jetbrains.exposed.v1.core.SortOrder
 import org.jetbrains.exposed.v1.core.and
@@ -27,8 +42,25 @@ import org.jetbrains.exposed.v1.jdbc.select
 import org.jetbrains.exposed.v1.jdbc.selectAll
 import org.jetbrains.exposed.v1.jdbc.upsert
 
+/**
+ * Latest writes a read returned with their ciphertext, within one page's bounds.
+ *
+ * @property writes Whole sections in the read's order; at least one whenever [next] is set.
+ * @property next The first section the read matched but left out, or `null` when it returned all.
+ */
+internal data class BudgetedWrites(
+    /** Whole sections in the read's order. */
+    val writes: List<SectionWrite>,
+    /** The first section left out, or `null`. */
+    val next: SectionRef?,
+)
+
 /** Reads and writes `cloak.sections`. Every function runs inside the caller's transaction. */
 internal object SectionRepository {
+    /** Ciphertext bytes of a row, 0 for a deletion; PostgreSQL reads a stored value's size without the value. */
+    private val CIPHERTEXT_BYTES: Expression<Long> =
+        Coalesce(CustomFunction<Long?>("octet_length", LongColumnType(), SectionsTable.ciphertext), longLiteral(0))
+
     /**
      * Loads a section's latest write.
      *
@@ -97,19 +129,21 @@ internal object SectionRepository {
             }
 
     /**
-     * Lists a vault's sections by the change number of their latest write.
+     * Lists a vault's sections by the change number of their latest write, held to [limit]
+     * sections and one page's budget of ciphertext ([Limits.MAX_PAGE_BYTES]).
      *
      * @param vaultId Vault.
      * @param afterChange Writes after this change number; 0 for all.
      * @param limit Most writes to return.
-     * @return Latest writes.
+     * @return Latest writes by change number, and the first one left for the next page.
      */
-    fun pageByChange(vaultId: VaultId, afterChange: Long, limit: Int): List<SectionWrite> =
-        SectionsTable.selectAll()
-            .where { (SectionsTable.vaultId eq vaultId.value) and (SectionsTable.changeSeq greater afterChange) }
-            .orderBy(SectionsTable.changeSeq to SortOrder.ASC)
-            .limit(limit)
-            .map { it.toWrite() }
+    fun pageByChange(vaultId: VaultId, afterChange: Long, limit: Int): BudgetedWrites =
+        budgeted(
+            source = SectionsTable,
+            where = (SectionsTable.vaultId eq vaultId.value) and (SectionsTable.changeSeq greater afterChange),
+            order = listOf(SectionsTable.changeSeq to SortOrder.ASC),
+            limit = limit,
+        )
 
     /**
      * Lists a vault's section headers by the change number of their latest write, without reading
@@ -180,27 +214,110 @@ internal object SectionRepository {
             }
 
     /**
-     * Loads the sections of nodes in vaults a user belongs to, in one query.
+     * Loads one page of a node's sections in vaults a user belongs to, by vault and then section
+     * name, held to [limit] sections and one page's budget of ciphertext ([Limits.MAX_PAGE_BYTES]).
+     *
+     * @param nodeId Node.
+     * @param userId Reader.
+     * @param after The last section of the previous page, or `null` for the first page.
+     * @param limit Most sections to return.
+     * @return Latest writes in that order, and the first one left for the next page.
+     */
+    fun readableByNode(nodeId: NodeId, userId: UserId, after: SectionRef?, limit: Int): BudgetedWrites {
+        val ofNode = SectionsTable.nodeId eq nodeId.value
+        return budgeted(
+            source = readableBy(userId),
+            where = if (after == null) {
+                ofNode
+            } else {
+                ofNode and ((SectionsTable.vaultId greater after.vaultId.value) or
+                    ((SectionsTable.vaultId eq after.vaultId.value) and (SectionsTable.sectionName greater after.sectionName.value)))
+            },
+            order = listOf(SectionsTable.vaultId to SortOrder.ASC, SectionsTable.sectionName to SortOrder.ASC),
+            limit = limit,
+        )
+    }
+
+    /**
+     * Loads one page of the sections of several nodes in vaults a user belongs to, by node, vault
+     * and section name, held to [limit] sections and one page's budget of ciphertext
+     * ([Limits.MAX_PAGE_BYTES]) together.
      *
      * @param nodeIds Nodes.
      * @param userId Reader.
-     * @return Latest writes by node.
+     * @param limit Most sections to return.
+     * @return Latest writes in that order, and the first one left for another read.
      */
-    fun readableByNode(nodeIds: Collection<NodeId>, userId: UserId): Map<NodeId, List<SectionWrite>> {
-        if (nodeIds.isEmpty()) return emptyMap()
-        return SectionsTable
+    fun readableByNodes(nodeIds: Collection<NodeId>, userId: UserId, limit: Int): BudgetedWrites =
+        budgeted(
+            source = readableBy(userId),
+            where = SectionsTable.nodeId inList nodeIds.map(NodeId::value),
+            order = listOf(SectionsTable.nodeId to SortOrder.ASC, SectionsTable.vaultId to SortOrder.ASC, SectionsTable.sectionName to SortOrder.ASC),
+            limit = limit,
+        )
+
+    /** Sections in the vaults [userId] is a member of. */
+    private fun readableBy(userId: UserId): ColumnSet =
+        SectionsTable.join(
+            VaultMembersTable,
+            JoinType.INNER,
+            additionalConstraint = {
+                (VaultMembersTable.vaultId eq SectionsTable.vaultId) and (VaultMembersTable.userId eq userId.value)
+            },
+        )
+
+    /**
+     * Reads latest writes with their ciphertext in [order], as many whole sections as fit in
+     * [limit] and [Limits.MAX_PAGE_BYTES] of ciphertext, in one statement.
+     *
+     * A subquery numbers the matching sections and sums their ciphertext sizes up to each, without
+     * the ciphertext: `octet_length` reads a stored value's size, not the value. Only the sections
+     * within both bounds are joined back for their whole rows, so the statement never loads more
+     * ciphertext than one page's budget. The first section always fits, since a section is at
+     * most [BlobRules.MAX_CIPHERTEXT_BYTES], which the budget holds. The subquery reads one section
+     * past [limit], so the result tells whether the read is complete.
+     *
+     * @param source Table or join the sections come from.
+     * @param where Which sections.
+     * @param order Their order, ending in a unique key.
+     * @param limit Most sections to return.
+     * @return The writes that fit, and the first matching section left out.
+     */
+    private fun budgeted(source: ColumnSet, where: Op<Boolean>, order: List<Pair<Expression<*>, SortOrder>>, limit: Int): BudgetedWrites {
+        val sorted = order.toTypedArray()
+        val position = rowNumber().over().orderBy(*sorted).alias("position")
+        val bytesThrough = Sum(CIPHERTEXT_BYTES, LongColumnType()).over().orderBy(*sorted)
+            .rows(WindowFrameBound.unboundedPreceding(), WindowFrameBound.currentRow())
+            .alias("bytes_through")
+        val planned = source
+            .select(SectionsTable.vaultId, SectionsTable.nodeId, SectionsTable.sectionName, position, bytesThrough)
+            .where(where)
+            .orderBy(*sorted)
+            .limit(limit + 1)
+            .alias("planned")
+        val plannedVault = planned[SectionsTable.vaultId]
+        val plannedNode = planned[SectionsTable.nodeId]
+        val plannedName = planned[SectionsTable.sectionName]
+        val rows = planned
             .join(
-                VaultMembersTable,
-                JoinType.INNER,
+                SectionsTable,
+                JoinType.LEFT,
                 additionalConstraint = {
-                    (VaultMembersTable.vaultId eq SectionsTable.vaultId) and (VaultMembersTable.userId eq userId.value)
+                    (SectionsTable.vaultId eq plannedVault) and (SectionsTable.nodeId eq plannedNode) and
+                        (SectionsTable.sectionName eq plannedName) and (planned[position] lessEq limit.toLong()) and
+                        (planned[bytesThrough] lessEq Limits.MAX_PAGE_BYTES.toLong())
                 },
             )
-            .select(SectionsTable.columns)
-            .where { SectionsTable.nodeId inList nodeIds.map(NodeId::value) }
-            .orderBy(SectionsTable.vaultId to SortOrder.ASC, SectionsTable.sectionName to SortOrder.ASC)
-            .map { it.toWrite() }
-            .groupBy { it.section.nodeId }
+            .select(listOf(plannedVault, plannedNode, plannedName) + SectionsTable.columns)
+            .orderBy(planned[position] to SortOrder.ASC)
+            .toList()
+        // Both bounds only grow along the order, so the rows that fit come first.
+        val fitting = rows.takeWhile { it.getOrNull(SectionsTable.writeHash) != null }
+        val next = rows.getOrNull(fitting.size)?.let {
+            SectionRef(VaultId(it[plannedVault]), NodeId(it[plannedNode]), SectionName(it[plannedName]))
+        }
+        check(next == null || fitting.isNotEmpty()) { "A page holds at least one section" }
+        return BudgetedWrites(fitting.map { it.toWrite() }, next)
     }
 
     /** Maps a row's section. */

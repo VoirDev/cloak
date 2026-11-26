@@ -2,8 +2,16 @@ import { sha256 } from '@noble/hashes/sha2.js';
 
 import { CloakCryptoError, isCloakCryptoError } from './CloakCryptoError.ts';
 import { decryptBlob, encryptBlob } from './blobs.ts';
-import { equalBytes } from './bytes.ts';
-import { Canonical } from './canonical.ts';
+import { equalBytes, isUuid } from './bytes.ts';
+import {
+  Canonical,
+  isBytes32,
+  isFlag,
+  isOptionalBytes32,
+  isStr,
+  isU32,
+  isU64,
+} from './canonical.ts';
 import type { CheckpointLeaf } from './checkpoints.ts';
 import { LABELS } from './labels.ts';
 import {
@@ -204,6 +212,36 @@ export function sectionHeaderMessage(header: SectionHeaderFields): Uint8Array {
 }
 
 /**
+ * Tells whether every field of a header fits its type in the canonical encoding (`PROTOCOL.md`
+ * §3), so that {@link sectionHeaderMessage} encodes it: UUIDs, well-formed strings, `u32` and
+ * `u64` numbers in range, a boolean `deleted` and 32-byte digests. Fields typed by the compiler
+ * may still hold anything a server sent, so a reader checks before it encodes.
+ *
+ * @param header Header fields, as served.
+ * @returns Whether the header has a canonical message.
+ */
+export function isWellFormedSectionHeader(header: SectionHeaderFields): boolean {
+  return (
+    isUuid(header.vaultId) &&
+    isUuid(header.nodeId) &&
+    isStr(header.nodeType) &&
+    isUuid(header.homeVaultId) &&
+    isUuid(header.ownerUserId) &&
+    isStr(header.nodeKey) &&
+    isStr(header.sectionName) &&
+    isU32(header.vaultKeyVersion) &&
+    isU64(header.dataVersion) &&
+    isFlag(header.deleted) &&
+    isU64(header.logSeq) &&
+    isBytes32(header.logHeadHash) &&
+    isOptionalBytes32(header.previousWriteHash) &&
+    isUuid(header.writerUserId) &&
+    isU32(header.writerKeyVersion) &&
+    isOptionalBytes32(header.ciphertextHash)
+  );
+}
+
+/**
  * Hashes a write into its `writeHash`, which the next write and checkpoints refer to.
  *
  * @param write Write fields.
@@ -237,9 +275,11 @@ export function signSectionWrite(write: SectionWriteFields, signingSeed: Uint8Ar
 /**
  * Why a write does not stand (`PROTOCOL.md` §8.4 rules 1 to 4 and 6):
  *
+ * - `malformed`: a header field is outside the range of its type in §3, so the write has no
+ *   canonical message;
+ * - `fork`: the log has another hash at `logSeq`, whether or not that entry is a head, or the
+ *   latest checkpoint holds another write of the same `dataVersion`;
  * - `not_a_head`: `logSeq` is not a head of the verified log;
- * - `fork`: the log has another hash at `logSeq`, or the latest checkpoint holds another write of
- *   the same `dataVersion`;
  * - `wrong_key_version`: `vaultKeyVersion` is not the vault's key version at `logSeq`;
  * - `bad_deletion`: a deletion with a ciphertext, or a write without;
  * - `not_an_editor`: the writer's keys were not committed for an editor at `logSeq`;
@@ -253,8 +293,9 @@ export function signSectionWrite(write: SectionWriteFields, signingSeed: Uint8Ar
  * - `rollback`: the latest checkpoint after `logSeq` holds a newer write of the section.
  */
 export type StandingRefusal =
-  | 'not_a_head'
+  | 'malformed'
   | 'fork'
+  | 'not_a_head'
   | 'wrong_key_version'
   | 'bad_deletion'
   | 'not_an_editor'
@@ -366,13 +407,14 @@ export function verifySectionStanding(
   options: StandingOptions,
 ): StandingCheck {
   const refuse = (reason: StandingRefusal): StandingCheck => ({ ok: false, reason });
+  if (!isWellFormedSectionHeader(header)) return refuse('malformed');
   if (header.vaultId !== log.vaultId) return refuse('not_a_head');
   if (log.deleted) return refuse('vault_deleted');
 
-  // Head (rule 1) and key version (rule 2).
+  // Head (rule 1): another hash at `logSeq` is evidence of a fork, head or not. Key version (rule 2).
   const point = log.points[header.logSeq - 1];
+  if (point !== undefined && !equalBytes(point.hash, header.logHeadHash)) return refuse('fork');
   if (point?.head !== true) return refuse('not_a_head');
-  if (!equalBytes(point.hash, header.logHeadHash)) return refuse('fork');
   if (header.vaultKeyVersion !== point.keyVersion) return refuse('wrong_key_version');
   if (header.deleted !== (header.ciphertextHash === undefined)) return refuse('bad_deletion');
 

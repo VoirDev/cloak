@@ -11,13 +11,13 @@ import kotlinx.io.bytestring.ByteString
 import org.jetbrains.exposed.v1.core.ResultRow
 import org.jetbrains.exposed.v1.core.SortOrder
 import org.jetbrains.exposed.v1.core.and
+import org.jetbrains.exposed.v1.core.between
 import org.jetbrains.exposed.v1.core.eq
 import org.jetbrains.exposed.v1.core.inList
 import org.jetbrains.exposed.v1.core.isNull
 import org.jetbrains.exposed.v1.core.plus
 import org.jetbrains.exposed.v1.core.statements.UpdateBuilder
 import org.jetbrains.exposed.v1.core.vendors.ForUpdateOption
-import org.jetbrains.exposed.v1.jdbc.insert
 import org.jetbrains.exposed.v1.jdbc.insertIgnore
 import org.jetbrains.exposed.v1.jdbc.select
 import org.jetbrains.exposed.v1.jdbc.selectAll
@@ -86,6 +86,21 @@ internal object IdentityRepository {
             ?.toPublicKeys()
 
     /**
+     * Counts a user's stored key versions within a range, in one query.
+     *
+     * @param userId Owner.
+     * @param keyVersions The range.
+     * @return How many of its versions are stored.
+     */
+    fun countKeys(userId: UserId, keyVersions: IntRange): Long =
+        IdentityKeysTable.select(IdentityKeysTable.keyVersion)
+            .where {
+                (IdentityKeysTable.userId eq userId.value) and
+                    (IdentityKeysTable.keyVersion.between(keyVersions.first, keyVersions.last))
+            }
+            .count()
+
+    /**
      * Loads every key version of several users, oldest first, in one query.
      *
      * @param userIds Users.
@@ -128,6 +143,37 @@ internal object IdentityRepository {
     }
 
     /**
+     * Tells whether a user has an identity that is not deleted, holding a key-share lock on its row
+     * for the rest of the transaction, so its deletion, which locks the row for update, waits for
+     * what the transaction stores about the user.
+     *
+     * @param userId User.
+     * @return Whether the user is registered and not deleted.
+     */
+    fun isLive(userId: UserId): Boolean =
+        IdentitiesTable.select(IdentitiesTable.deletedAt)
+            .where { IdentitiesTable.userId eq userId.value }
+            .forUpdate(ForUpdateOption.PostgreSQL.ForKeyShare)
+            .singleOrNull()
+            ?.let { it[IdentitiesTable.deletedAt] == null } ?: false
+
+    /**
+     * Locks a user's identity row so that additions of the user to vaults run one at a time,
+     * whichever vaults they are, and their counts of pending invitations stay exact. The lock is
+     * no-key-update: it waits for and blocks other additions, key replacements and deletions of the
+     * user, never the key-share lock every request of the user starts with. Take it before any
+     * shared lock on the row, which it would otherwise have to upgrade.
+     *
+     * @param userId The user to be added.
+     */
+    fun lockForInvitation(userId: UserId) {
+        IdentitiesTable.select(IdentitiesTable.userId)
+            .where { IdentitiesTable.userId eq userId.value }
+            .forUpdate(ForUpdateOption.PostgreSQL.ForNoKeyUpdate())
+            .toList()
+    }
+
+    /**
      * Returns which of some users are deleted.
      *
      * @param userIds Users.
@@ -143,21 +189,24 @@ internal object IdentityRepository {
     }
 
     /**
-     * Locks an identity for update, for its deletion.
+     * Locks an identity for update, for its deletion, before any vault: every request holds its
+     * caller's row in key-share mode, so this waits for the user's requests in progress and keeps
+     * new ones, and every addition of the user to a vault, out until the transaction ends.
      *
      * @param userId User.
-     * @return Whether the identity exists and is not deleted.
+     * @return Whether the identity is deleted; `null` when the user never registered.
      */
-    fun lockLive(userId: UserId): Boolean =
+    fun lockForUpdate(userId: UserId): Boolean? =
         IdentitiesTable.select(IdentitiesTable.deletedAt)
             .where { IdentitiesTable.userId eq userId.value }
             .forUpdate(ForUpdateOption.PostgreSQL.ForUpdate())
             .singleOrNull()
-            ?.let { it[IdentitiesTable.deletedAt] == null } ?: false
+            ?.let { it[IdentitiesTable.deletedAt] != null }
 
     /**
      * Turns an identity into a tombstone (`PROTOCOL.md` §5.7): erases its host user id, KDF
-     * parameters and both bundles. Its key versions stay. Lock it with [lockLive] first.
+     * parameters and both bundles. Its key versions stay. Lock it with [lockForUpdate] first; a
+     * tombstone stays as it is.
      *
      * @param userId User.
      * @param now Deletion instant.
@@ -216,14 +265,19 @@ internal object IdentityRepository {
         }.insertedCount == 1
 
     /**
-     * Stores a key version with its statement.
+     * Stores a key version with its statement unless another key version uses its signing key.
+     * The unique constraint `uq_identity_keys__signing_public_key` decides, so of two requests
+     * racing for one signing key past [isSigningKeyTaken] only one stores it. It is the only
+     * conflict there can be: the version follows a row this transaction inserted or advanced
+     * ([insertIdentity], [advanceKeys]), so its primary key is free.
      *
      * @param statement The verified statement.
      * @param keysDigest `keysDigest` of the version.
+     * @return Whether it was stored; `false` when its signing key is taken.
      */
-    fun insertStatement(statement: KeyStatement, keysDigest: ByteString) {
+    fun insertStatement(statement: KeyStatement, keysDigest: ByteString): Boolean {
         val keys = statement.keys
-        IdentityKeysTable.insert {
+        return IdentityKeysTable.insertIgnore {
             it[userId] = keys.userId.value
             it[keyVersion] = keys.keyVersion
             it[cryptoSuite] = keys.cryptoSuite.toShort()
@@ -235,7 +289,7 @@ internal object IdentityRepository {
             it[signature] = statement.signature.toByteArray()
             it[recoverySignature] = statement.recoverySignature?.toByteArray()
             it[createdAt] = statement.createdAt
-        }
+        }.insertedCount == 1
     }
 
     /**

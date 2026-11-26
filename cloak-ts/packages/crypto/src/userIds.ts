@@ -1,7 +1,7 @@
 import { sha1 } from '@noble/hashes/legacy.js';
 
 import { CloakCryptoError } from './CloakCryptoError.ts';
-import { concatBytes, utf8, uuidBytes, uuidFromBytes } from './bytes.ts';
+import { concatBytes, isWellFormed, utf8, uuidBytes, uuidFromBytes } from './bytes.ts';
 
 /**
  * The namespace of Cloak user ids (`PROTOCOL.md` §5.0): UUIDv5 of the URL namespace and
@@ -19,9 +19,14 @@ export const MAX_HOST_USER_ID_BYTES = 255;
  *
  * @param hostUserId The host's id of the user, exactly as its authentication gives it.
  * @returns The user's Cloak id.
- * @throws {CloakCryptoError} `invalid_format` when the id is empty or longer than 255 bytes.
+ * @throws {CloakCryptoError} `invalid_format` when the id is empty, longer than 255 bytes, or not
+ *   well-formed Unicode: `TextEncoder` would write U+FFFD for a lone surrogate, so two host ids
+ *   would derive one user id.
  */
 export function cloakUserId(hostUserId: string): string {
+  if (!isWellFormed(hostUserId)) {
+    throw new CloakCryptoError('invalid_format', 'A host user id is well-formed Unicode');
+  }
   const name = utf8(hostUserId);
   if (name.length === 0 || name.length > MAX_HOST_USER_ID_BYTES) {
     throw new CloakCryptoError('invalid_format', 'A host user id has 1 to 255 bytes');

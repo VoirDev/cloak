@@ -16,7 +16,7 @@ import kotlin.uuid.Uuid
  * Encoded as base64url without padding of `0x03 ‖ u64 seq ‖ uuid nodeId ‖ UTF-8 sectionName`.
  */
 internal object LeafCursor {
-    /** Byte that tags a leaf cursor; [KeysetCursor.Kind] uses the others. */
+    /** Byte that tags a leaf cursor; [KeysetCursor.Kind] and [NodeCursor] use the others. */
     private const val KIND: Byte = 3
 
     /** Base64url without padding, as every binary value of the API. */

@@ -1,5 +1,6 @@
 package dev.voir.cloak.server.vault.persistence
 
+import dev.voir.cloak.server.identity.persistence.IdentitiesTable
 import dev.voir.cloak.server.persistence.SqlCondition
 import org.jetbrains.exposed.v1.core.ReferenceOption
 import org.jetbrains.exposed.v1.core.Table
@@ -112,18 +113,42 @@ internal object NodeShareNamesTable : Table("cloak.node_share_names") {
 
 /**
  * Relational schema of `cloak.accepted_inviters`: people whose every vault a user accepts, now and
- * later (`PROTOCOL.md` §12.4).
+ * later (`PROTOCOL.md` §12.4), with the user's signed `inviterAcceptance` (§9). Both people are
+ * registered identities, and a row goes with either.
  */
 internal object AcceptedInvitersTable : Table("cloak.accepted_inviters") {
     /** The user who accepts. */
     val userId = uuid("user_id")
+        .references(
+            IdentitiesTable.userId,
+            onDelete = ReferenceOption.CASCADE,
+            onUpdate = ReferenceOption.RESTRICT,
+            fkName = "fk_accepted_inviters__user_id__identities",
+        )
 
     /** The person whose vaults they accept. */
     val inviterUserId = uuid("inviter_user_id")
+        .references(
+            IdentitiesTable.userId,
+            onDelete = ReferenceOption.CASCADE,
+            onUpdate = ReferenceOption.RESTRICT,
+            fkName = "fk_accepted_inviters__inviter_user_id__identities",
+        )
+        .index("ix_accepted_inviters__inviter_user_id")
 
-    /** When they accepted. */
+    /** The user's identity key version that signed [signature]. */
+    val keyVersion = integer("key_version")
+
+    /** The user's signed `inviterAcceptance`, the latest they sent. */
+    val signature = binary("signature")
+
+    /** When they first accepted. */
     val acceptedAt = timestamp("accepted_at")
 
     /** Primary key: one acceptance per pair. */
     override val primaryKey: PrimaryKey = PrimaryKey(userId, inviterUserId, name = "pk_accepted_inviters")
+
+    init {
+        check("ck_accepted_inviters__signature_length") { SqlCondition("octet_length(signature) = 65") }
+    }
 }

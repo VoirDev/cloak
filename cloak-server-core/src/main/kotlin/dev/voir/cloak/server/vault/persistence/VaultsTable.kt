@@ -10,7 +10,7 @@ import org.jetbrains.exposed.v1.datetime.timestamp
 /**
  * Relational schema of `cloak.vaults`: units of access, with their current key version, log head,
  * last section change number, section counts and write pause. Every request that changes a vault
- * locks its row first.
+ * locks its row, right after its caller's identity row and before anything else.
  */
 internal object VaultsTable : Table("cloak.vaults") {
     /** Client-generated vault id. */

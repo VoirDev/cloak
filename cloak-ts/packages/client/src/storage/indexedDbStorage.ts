@@ -84,6 +84,13 @@ export function createIndexedDbStorage(options: IndexedDbStorageOptions = {}): C
         store.delete(IDBKeyRange.bound(prefix, `${prefix}\uffff`, false, true)),
       );
     },
+    async keys(prefix) {
+      // The same key range as deletePrefix: exactly the keys with the prefix.
+      const keys = await run('readonly', (store) =>
+        store.getAllKeys(IDBKeyRange.bound(prefix, `${prefix}￿`, false, true)),
+      );
+      return keys.filter((key): key is string => typeof key === 'string');
+    },
     async update(key, change) {
       const db = await open();
       await new Promise<void>((resolve, reject) => {

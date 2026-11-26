@@ -123,16 +123,27 @@ internal class CloakContext(
          * deleted, holding a key-share lock on their identity row so an erasure cannot commit
          * while the request runs.
          *
+         * Lock order: the caller's identity row first, before any vault row; then vaults in id
+         * order. A deletion or erasure locks the identity row for update in the same place, so
+         * it never waits for a vault while a request of the same user waits for it.
+         *
          * @param caller The user making the request.
          * @param budget Statement budget.
+         * @param forDeletion Whether to lock the caller's row for update instead, for the deletion
+         *   of their identity.
          * @param block Transaction body; a thrown exception rolls everything back.
          * @return The block's result.
          * @throws CloakException `identity_deleted` when the caller is deleted, `busy` when the
          *   database ran out of time.
          */
-        fun <T> asCaller(caller: UserId, budget: Budget = Budget.STANDARD, block: () -> T): T =
+        fun <T> asCaller(caller: UserId, budget: Budget = Budget.STANDARD, forDeletion: Boolean = false, block: () -> T): T =
             run(budget) {
-                if (IdentityRepository.isDeleted(caller, lock = true)) throw CloakException.identityDeleted()
+                val deleted = if (forDeletion) {
+                    IdentityRepository.lockForUpdate(caller) == true
+                } else {
+                    IdentityRepository.isDeleted(caller, lock = true)
+                }
+                if (deleted) throw CloakException.identityDeleted()
                 block()
             }
 

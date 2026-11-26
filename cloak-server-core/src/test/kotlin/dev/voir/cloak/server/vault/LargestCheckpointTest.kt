@@ -2,19 +2,24 @@ package dev.voir.cloak.server.vault
 
 import dev.voir.cloak.server.CloakFixture
 import dev.voir.cloak.server.CloakSettings
+import dev.voir.cloak.server.assertCloakError
+import dev.voir.cloak.server.error.CloakErrorCode
+import dev.voir.cloak.server.error.FieldError
 import dev.voir.cloak.server.meta.Limits
 import dev.voir.cloak.server.persistence.toByteString
 import dev.voir.cloak.server.protocol.Merkle
 import dev.voir.cloak.server.section.domain.NodeId
 import dev.voir.cloak.server.section.domain.SectionName
 import dev.voir.cloak.server.vault.domain.CheckpointLeaf
+import dev.voir.cloak.server.vault.domain.CheckpointProofQuery
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.uuid.Uuid
 
 /**
  * Taking access away must always be possible: a checkpoint over a vault at its section limit is
- * built, stored, read back and served within the server's default database budget.
+ * built, stored, read back and served within the server's default database budget, and a proof
+ * batch never costs more than one such checkpoint.
  */
 class LargestCheckpointTest {
     private val cloak = CloakFixture(CloakSettings.defaults())
@@ -68,5 +73,15 @@ class LargestCheckpointTest {
         assertEquals(count, pages.first().size)
         assertEquals(leaves, pages.flatMap { it.leaves })
         assertEquals(count.toLong(), cloak.number("select count(*) from cloak.checkpoint_leaves"))
+
+        // One proof batch costs at most one vault's worth of leaves: both full checkpoints at once
+        // are refused, either one alone is answered.
+        val asked = leaves[count / 2]
+        val both = listOf(seq - 1, seq).map { CheckpointProofQuery(it, asked.nodeId, asked.sectionName) }
+        val refused = assertCloakError(CloakErrorCode.VALIDATION_FAILED) { cloak.server.vaults.checkpointProofs(alice.id, vault, both) }
+        assertEquals(FieldError("/items", "max_checkpoint_leaves", refused.fieldErrors.single().message), refused.fieldErrors.single())
+        val proof = cloak.server.vaults.checkpointProofs(alice.id, vault, both.takeLast(1)).single()
+        assertEquals(asked, proof.inclusion?.leaf)
+        assertEquals(count.toLong(), proof.size)
     }
 }

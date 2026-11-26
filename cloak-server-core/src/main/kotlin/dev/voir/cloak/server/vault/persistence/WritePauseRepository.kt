@@ -4,6 +4,7 @@ import dev.voir.cloak.server.identity.domain.UserId
 import dev.voir.cloak.server.vault.domain.VaultId
 import org.jetbrains.exposed.v1.core.and
 import org.jetbrains.exposed.v1.core.eq
+import org.jetbrains.exposed.v1.jdbc.deleteWhere
 import org.jetbrains.exposed.v1.jdbc.selectAll
 import org.jetbrains.exposed.v1.jdbc.upsert
 import kotlin.time.Instant
@@ -39,5 +40,15 @@ internal object WritePauseRepository {
             it[WritePauseRequestsTable.userId] = userId.value
             it[pausedAt] = at
         }
+    }
+
+    /**
+     * Forgets every pause a user made, for the deletion of their identity. Unlike the other
+     * functions it needs no vault lock: a deleted user pauses nothing again.
+     *
+     * @param userId The user.
+     */
+    fun deleteOf(userId: UserId) {
+        WritePauseRequestsTable.deleteWhere { WritePauseRequestsTable.userId eq userId.value }
     }
 }

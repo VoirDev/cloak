@@ -17,8 +17,8 @@ import dev.voir.cloak.server.vault.domain.VaultId
  *   and `stale_head`; `null` otherwise.
  * @property fieldErrors Violated rules for `validation_failed`; empty otherwise.
  * @property role Role the caller needs, for `role_required`; `null` otherwise.
- * @property retryAfterSeconds Seconds to wait before retrying, for `busy` and `rate_limited`; `null`
- *   otherwise.
+ * @property retryAfterSeconds Seconds to wait before retrying, for `busy`, `rate_limited` and
+ *   `pause_held`; `null` otherwise.
  * @property vaultId The vault a batch request was refused for; `null` otherwise.
  */
 public class CloakException(
@@ -32,7 +32,7 @@ public class CloakException(
     public val fieldErrors: List<FieldError> = emptyList(),
     /** Role the caller needs, for `role_required`. */
     public val role: Role? = null,
-    /** Seconds to wait before retrying, for `busy` and `rate_limited`. */
+    /** Seconds to wait before retrying, for `busy`, `rate_limited` and `pause_held`. */
     public val retryAfterSeconds: Int? = null,
     /** The vault a batch request was refused for. */
     public val vaultId: VaultId? = null,
@@ -116,7 +116,8 @@ public class CloakException(
         /**
          * Section writes to a vault are paused for a checkpoint (`PROTOCOL.md` §7.5).
          *
-         * @param retryAfterSeconds Seconds until the pause ends.
+         * @param retryAfterSeconds Seconds to wait before writing again: until the pause ends, or
+         *   less, since a pause usually ends as soon as its holder's request is applied.
          * @return A `busy` exception.
          */
         fun paused(retryAfterSeconds: Int): CloakException =

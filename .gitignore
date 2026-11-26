@@ -4,3 +4,12 @@ build/
 *.iml
 .idea/
 .DS_Store
+
+# Secrets and machine-local settings
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.jks
+local.properties

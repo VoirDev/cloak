@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   KIND_CODE,
   ROLE_CODE,
+  addedBy,
   entryHash,
   keysDigest,
   logHead,
@@ -12,6 +13,8 @@ import {
   signLogEntry,
   type LogEntry,
   type LogEntryFields,
+  type LogEntryKind,
+  type Role,
   type ReplayResult,
 } from '../src/index.ts';
 import { BadFlag, IDENTITIES, keysOf, toLogEntry } from './fixtures.ts';
@@ -92,6 +95,9 @@ describe('vault log', () => {
     expect(membershipAt(state, BOB, 5)?.role).toBe('viewer');
     expect(membershipAt(state, BOB, ENTRIES.length)).toBeUndefined();
     expect(membershipAt(state, BOB, 0)).toBeUndefined();
+    // The owner made the vault and added everyone else in it; Bob, removed, is a member no more.
+    for (const userId of state.members.keys()) expect(addedBy(state, userId)).toBe(OWNER);
+    expect(addedBy(state, BOB)).toBeUndefined();
     expect(state.recordedKeyVersions.get(OWNER)).toBe(2);
     expect(state.points.map((point) => point.authorUserId)).toEqual(
       ENTRIES.map((json) => text(child(json, 'entry'), 'authorUserId')),
@@ -230,6 +236,55 @@ describe('vault log', () => {
         userId === '0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e' && keyVersion === 1,
     });
     expect(result).toEqual({ ok: false, reason: 'superseded_keys', failSeq: 1 });
+  });
+
+  it.each([
+    ['a vault key version of 2^32', { keyVersion: 2 ** 32 }],
+    ['an author key version of 2^32', { authorKeyVersion: 2 ** 32 }],
+    ['a subject key version of 2^32', { subjectKeyVersion: 2 ** 32 }],
+    ['a negative or fractional version', { keyVersion: -1 }],
+    ['a subject key digest of 31 bytes', { subjectKeys: new Uint8Array(31) }],
+    ['a key commitment of 33 bytes', { keyCommitment: new Uint8Array(33) }],
+    ['an unknown kind', { kind: 'vault_renamed' as string as LogEntryKind }],
+    ['an unknown role', { role: 'guest' as string as Role }],
+    ['an uppercase vault id', { vaultId: VAULT.toUpperCase() }],
+    ['a node key with a lone surrogate', { nodeKey: 'x\uD800' }],
+  ] as const)('refuses an entry with %s as malformed, without throwing', (_, change) => {
+    const entries = ENTRIES.map(toLogEntry);
+    const [first, ...rest] = entries;
+    if (first === undefined) throw new Error('entry');
+    expect(replayVaultLog(VAULT, [{ ...first, ...change }, ...rest], { keysOf })).toEqual({
+      ok: false,
+      reason: 'malformed',
+      failSeq: 1,
+    });
+  });
+
+  it('refuses a held checkpoint leaf outside its types as malformed', () => {
+    const entries = ENTRIES.slice(0, 5).map(toLogEntry);
+    const demotion = entries[4];
+    const leaf = demotion?.checkpointLeaves?.[0];
+    if (demotion === undefined || leaf === undefined) throw new Error('checkpoint');
+    const malformed = {
+      ...demotion,
+      checkpointLeaves: [{ ...leaf, writeHash: new Uint8Array(31) }],
+    };
+    expect(replayVaultLog(VAULT, [...entries.slice(0, 4), malformed], { keysOf })).toEqual({
+      ok: false,
+      reason: 'malformed',
+      failSeq: 5,
+    });
+  });
+
+  it('refuses a requestEnd that is no flag as bad_flag', () => {
+    const [first, ...rest] = ENTRIES.map(toLogEntry);
+    if (first === undefined) throw new Error('entry');
+    const unflagged = { ...first, requestEnd: 1 as unknown as boolean };
+    expect(replayVaultLog(VAULT, [unflagged, ...rest], { keysOf })).toEqual({
+      ok: false,
+      reason: 'bad_flag',
+      failSeq: 1,
+    });
   });
 
   it.each(objects(LOG, 'negatives').map((json) => [text(json, 'name'), json] as const))(

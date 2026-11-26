@@ -11,6 +11,22 @@ const BASE64URL_INDEX: readonly number[] = Array.from({ length: 128 }, (_, code)
   BASE64URL.indexOf(String.fromCharCode(code)),
 );
 
+/** A lone surrogate: in a `u` pattern, a surrogate pair is one code point and never matches. */
+const LONE_SURROGATE = /\p{Surrogate}/u;
+
+/**
+ * Tells whether a string is well-formed Unicode, with no lone surrogate: what
+ * `String.prototype.isWellFormed` tells, which the ES2023 library this package is typed against
+ * lacks. `TextEncoder` writes U+FFFD for a lone surrogate, so only a well-formed string has its
+ * own UTF-8 bytes.
+ *
+ * @param text Text to test.
+ * @returns Whether it is well-formed.
+ */
+export function isWellFormed(text: string): boolean {
+  return !LONE_SURROGATE.test(text);
+}
+
 /**
  * Encodes a string as UTF-8 without normalizing it.
  *
@@ -153,6 +169,22 @@ export function fromBase64Url(text: string): Uint8Array {
 }
 
 /**
+ * The lowercase canonical form of a UUID, the only one accepted: ids are compared and stored as
+ * strings, so another spelling of the same bytes would slip past rollback and fork tracking.
+ */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * Tells whether a value is a UUID in lowercase canonical form, as {@link uuidBytes} takes it.
+ *
+ * @param value Value to test.
+ * @returns Whether it is a lowercase hyphenated UUID.
+ */
+export function isUuid(value: unknown): value is string {
+  return typeof value === 'string' && UUID.test(value);
+}
+
+/**
  * Parses a UUID into its 16 bytes in RFC 9562 order.
  *
  * @param uuid Hyphenated UUID in lowercase canonical form.
@@ -160,9 +192,7 @@ export function fromBase64Url(text: string): Uint8Array {
  * @throws {CloakCryptoError} `invalid_format` when it is not a lowercase UUID.
  */
 export function uuidBytes(uuid: string): Uint8Array {
-  // Only the lowercase canonical form: ids are compared and stored as strings, so another
-  // spelling of the same bytes would slip past rollback and fork tracking.
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(uuid)) {
+  if (!isUuid(uuid)) {
     throw new CloakCryptoError('invalid_format', 'Not a lowercase UUID');
   }
   const hex = uuid.replaceAll('-', '');

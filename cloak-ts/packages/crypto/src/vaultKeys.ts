@@ -1,6 +1,6 @@
 import { CloakCryptoError } from './CloakCryptoError.ts';
 import { decryptBlob, encryptBlob } from './blobs.ts';
-import { concatBytes, equalBytes, randomBytes, utf8, uuidBytes } from './bytes.ts';
+import { equalBytes, randomBytes, utf8, uuidBytes } from './bytes.ts';
 import { Canonical } from './canonical.ts';
 import { openBlob, sealBlob } from './hpke.ts';
 import { hkdf } from './kdf.ts';
@@ -59,19 +59,16 @@ export function wrapKey(vaultKey: Uint8Array, vaultId: string): Uint8Array {
  * @param vaultId Vault.
  * @param keyVersion Version of the key.
  * @returns `HKDF(vaultKey, salt = uuid vaultId ‖ u32 keyVersion, "cloak/v1/vault-key-commit")`.
+ * @throws {RangeError} when the version is outside `0..2^32-1`.
  */
 export function keyCommitment(
   vaultKey: Uint8Array,
   vaultId: string,
   keyVersion: number,
 ): Uint8Array {
-  const version = new Uint8Array(4);
-  new DataView(version.buffer).setUint32(0, keyVersion);
-  return hkdf(
-    requireKey(vaultKey),
-    concatBytes(uuidBytes(vaultId), version),
-    LABELS.vaultKeyCommit,
-  );
+  // Canonical range-checks the version: a DataView would wrap 2^32 + 1 to 1.
+  const salt = new Canonical().uuid(vaultId).u32(keyVersion).build();
+  return hkdf(requireKey(vaultKey), salt, LABELS.vaultKeyCommit);
 }
 
 /**

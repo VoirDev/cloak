@@ -58,6 +58,14 @@ class ProtocolVectorsTest {
             }
         }
 
+    @TestFactory
+    fun `X25519 public keys get every vector verdict`(): List<DynamicTest> =
+        vectors("identity.json").array("encryptionKeys").map { case ->
+            DynamicTest.dynamicTest(case.string("key")) {
+                assertEquals(case.optionalString("reason"), X25519Keys.refusal(case.bytes("key"))?.code)
+            }
+        }
+
     @Test
     fun `fingerprints and key statements match and verify`() {
         val identity = vectors("identity.json")
@@ -119,11 +127,35 @@ class ProtocolVectorsTest {
     }
 
     @Test
+    fun `vault and inviter acceptances are signed as the vectors say`() {
+        val acceptances = vectors("identity.json").obj("acceptances")
+        val signer = acceptances.obj("signer")
+        val userId = UserId(Uuid.parse(signer.string("userId")))
+        val keys = KEYS.keys(userId, signer.int("keyVersion"))!!
+        val vault = acceptances.obj("vault")
+        val vaultMessage = Messages.vaultAcceptance(userId, keys.keyVersion, VaultId(Uuid.parse(vault.string("vaultId"))))
+        assertEquals(vault.string("message"), vaultMessage.hex())
+        assertNull(StrictEd25519.check(keys.signingPublicKey, vaultMessage, vault.bytes("signature")))
+        val inviter = acceptances.obj("inviter")
+        val inviterMessage = Messages.inviterAcceptance(userId, keys.keyVersion, UserId(Uuid.parse(inviter.string("inviterUserId"))))
+        assertEquals(inviter.string("message"), inviterMessage.hex())
+        assertNull(StrictEd25519.check(keys.signingPublicKey, inviterMessage, inviter.bytes("signature")))
+    }
+
+    @Test
     fun `host user ids are 1 to 255 bytes of well-formed Unicode`() {
         assertFailsWith<IllegalArgumentException> { HostUserId.of("") }
         assertFailsWith<IllegalArgumentException> { HostUserId.of("é".repeat(128)) }
         assertFailsWith<IllegalArgumentException> { HostUserId.of("\uD800") }
         assertEquals(255, HostUserId.of("x".repeat(255)).value.length)
+    }
+
+    @Test
+    fun `canonical strings are well-formed Unicode`() {
+        assertFailsWith<IllegalArgumentException> { Canonical().str("x\uD800") }
+        assertFailsWith<IllegalArgumentException> { Canonical().str("\uDC00x") }
+        assertEquals("000478efbfbd", Canonical().str("x\uFFFD").build().hex())
+        assertEquals("0004f09f9880", Canonical().str("\uD83D\uDE00").build().hex())
     }
 
     @TestFactory
@@ -241,8 +273,11 @@ class ProtocolVectorsTest {
             } catch (violation: LogViolation) {
                 return violation.reason to violation.seq
             }
+            // A leaf list that names a section twice is refused whatever root it gives (§7.5).
             val badLeaves = request.firstOrNull { (entry, leaves) ->
-                leaves != null && Merkle.root(leaves.sortedWith(Merkle.sectionOrder)) != entry.fields.checkpoint
+                leaves != null &&
+                    (leaves.distinctBy { it.nodeId to it.sectionName }.size != leaves.size ||
+                        Merkle.root(leaves.sortedWith(Merkle.sectionOrder)) != entry.fields.checkpoint)
             }
             request.clear()
             return badLeaves?.let { "bad_checkpoint" to it.first.fields.seq }

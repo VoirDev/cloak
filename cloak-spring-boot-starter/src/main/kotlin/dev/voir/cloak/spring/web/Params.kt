@@ -15,10 +15,10 @@ internal object Params {
     /** A vault id from the path; a malformed one cannot name anything, so it answers `not_found`. */
     fun vault(value: String): VaultId = VaultId(pathId(value, "vault"))
 
-    /** A user id from the path. */
+    /** A user id from the path; a malformed one answers `not_found`. */
     fun user(value: String): UserId = UserId(pathId(value, "user"))
 
-    /** A node id from the path. */
+    /** A node id from the path; a malformed one answers `not_found`. */
     fun node(value: String): NodeId = NodeId(pathId(value, "node"))
 
     /** A section name from the path; a malformed one answers `not_found`. */
@@ -95,11 +95,12 @@ internal object Params {
         value?.let { it.toIntOrNull()?.takeIf { n -> n >= 1 } ?: throw Wire.invalid("#/query/$name", "type", "Must be a positive integer.") }
 
     /**
-     * Parses a required id from the query.
+     * Parses a required id from the query, in its canonical form only, lowercase and hyphenated.
      *
      * @param value Query value.
      * @param name Parameter name.
      * @return The id.
+     * @throws CloakException `validation_failed` when it is missing or spelled any other way.
      */
     fun queryId(value: String?, name: String): Uuid =
         Wire.uuid(value ?: throw Wire.invalid("#/query/$name", "required", "Required."), "#/query/$name")
@@ -113,7 +114,13 @@ internal object Params {
     fun notFound(what: String): CloakException =
         CloakException(CloakErrorCode.NOT_FOUND, "The $what does not exist or is not visible to you.")
 
-    /** Parses an id from the path. */
-    private fun pathId(value: String, what: String): Uuid =
-        runCatching { Wire.uuid(value, "") }.getOrElse { throw notFound(what) }
+    /**
+     * Parses an id from the path in its canonical form only, lowercase and hyphenated as the
+     * contract writes it; any other spelling names nothing and answers `not_found`.
+     *
+     * @param value Path value.
+     * @param what Kind of resource, for the problem's detail.
+     * @return The id.
+     */
+    private fun pathId(value: String, what: String): Uuid = Wire.canonicalUuid(value) ?: throw notFound(what)
 }

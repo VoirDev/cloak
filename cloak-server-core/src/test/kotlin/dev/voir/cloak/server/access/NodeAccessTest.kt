@@ -31,7 +31,7 @@ class NodeAccessTest {
     /** Adds [user] to [vaultId] and accepts, so the host counts them. */
     private fun join(vaultId: VaultId, user: TestClient, role: Role = Role.VIEWER) {
         cloak.addMember(alice, vaultId, user, role)
-        cloak.server.members.accept(user.id, vaultId)
+        cloak.accept(user, vaultId)
     }
 
     @Test
@@ -88,7 +88,7 @@ class NodeAccessTest {
         val bobs = cloak.createVault(bob)
         val carol = cloak.user()
         cloak.addMember(bob, bobs, carol, Role.VIEWER)
-        cloak.server.members.accept(carol.id, bobs)
+        cloak.accept(carol, bobs)
 
         // Alice never shared her node into Bob's vault, so a write of it there does not stand.
         val planted = assertCloakError(CloakErrorCode.VALIDATION_FAILED) { cloak.write(bob, bobs, node, "general") }
@@ -110,7 +110,7 @@ class NodeAccessTest {
         assertEquals(emptyList(), access.readableNodes(bob.hostUserId.value))
         assertNull(access.role(bob.hostUserId.value, home.value.toJavaUuid()))
 
-        cloak.server.members.accept(bob.id, home)
+        cloak.accept(bob, home)
         assertNotNull(access.canRead(bob.hostUserId.value, node.value.toJavaUuid()))
 
         cloak.server.vaults.delete(alice.id, home, cloak.entry(alice, home, LogEntryKind.VAULT_DELETED))
@@ -124,10 +124,10 @@ class NodeAccessTest {
         val node = cloak.node(alice, home)
         val team = cloak.createVault(bob)
         cloak.addMember(bob, team, alice, Role.ADMIN)
-        cloak.server.members.accept(alice.id, team)
+        cloak.accept(alice, team)
         val carol = cloak.user()
         cloak.addMember(bob, team, carol, Role.VIEWER)
-        cloak.server.members.accept(carol.id, team)
+        cloak.accept(carol, team)
         cloak.share(alice, team, node)
         assertNotNull(access.canRead(carol.hostUserId.value, node.value.toJavaUuid()))
 

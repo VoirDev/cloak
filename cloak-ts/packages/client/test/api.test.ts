@@ -128,6 +128,7 @@ describe('the API transport', () => {
       noBody(
         api.PUT('/vaults/{vaultId}/acceptance', {
           params: { path: { vaultId: '0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e' } },
+          body: { keyVersion: 1, signature: 'A'.repeat(87) },
           signal: controller.signal,
         }),
       ),

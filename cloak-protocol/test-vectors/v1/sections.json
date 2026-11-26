@@ -3118,6 +3118,135 @@
         }
       ],
       "reason": "bad_deletion"
+    },
+    {
+      "name": "owner-forked-not-a-head",
+      "write": {
+        "vaultId": "0192f5a3-0000-7aaa-8bbb-0123456789ab",
+        "nodeId": "afdd515a-cdcf-5c88-8cb2-66e7b6db2dd9",
+        "nodeType": "compute.vps",
+        "homeVaultId": "0192f5a3-0000-7aaa-8bbb-0123456789ab",
+        "ownerUserId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e",
+        "nodeKey": "server-1",
+        "sectionName": "general",
+        "vaultKeyVersion": 1,
+        "dataVersion": 3,
+        "deleted": 0,
+        "logSeq": 6,
+        "logHeadHash": "b27eadb7f202fa06c09ca3b7c14befe7176ac50325badaeb2d777881d4252098",
+        "previousWriteHash": "8ec1d3e900eaccca9ecf8f3d38112a2e6b50bbedef8eb91a4472ccc196839974",
+        "writerUserId": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e",
+        "writerKeyVersion": 1,
+        "ciphertextHash": "78deab8b80f2fd5f28ddcc7df7bb1e2af50b32be59eb76d6ccdc2b7c3b505c35"
+      },
+      "ciphertext": "0177bdf084ec0ed60bdb99a7d885fbbdc44cbb72cff8c3d103ccf46e901d4b10cee5958571ab9ec8ffd9e05ec103e63e8ffe07c9c189dbcb7ff850105aaccf17c5bd28ce7db71ce31aecf2d905c7af5a79671b37b89b210c9e2c72f5f38f248bfcf29a80c64a4bfddb91a77f754ce03ac7fa92b0b9e669d3c53901b11b03d7975fd94dad10b1c5890d094049735979f5da50135a031b623e7a76493340b4e488bed5ccee55aaa2a35cbd1a7786782c11f3afb2d4d88d3ead4ad01223f35e99b78f595ef2dd75082f66afc0dc036a739759a6765145b402feb6e33941204391b9d7bfb7be4ff0478df6436ab8b715d8d6cc37e23d6e09336eca477db51aa9c3056dcca51c192e81fcd03e1fcaf9d48d4248462bb58eceb349ce4beb21bb9941d3b71cd4f1251378f9a2",
+      "contentUtf8": "{\"name\":\"x\"}",
+      "fields": [
+        {
+          "type": "label",
+          "value": "cloak/v1/section-write"
+        },
+        {
+          "type": "uuid",
+          "value": "0192f5a3-0000-7aaa-8bbb-0123456789ab"
+        },
+        {
+          "type": "uuid",
+          "value": "afdd515a-cdcf-5c88-8cb2-66e7b6db2dd9"
+        },
+        {
+          "type": "str",
+          "value": "compute.vps"
+        },
+        {
+          "type": "uuid",
+          "value": "0192f5a3-0000-7aaa-8bbb-0123456789ab"
+        },
+        {
+          "type": "uuid",
+          "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e"
+        },
+        {
+          "type": "str",
+          "value": "server-1"
+        },
+        {
+          "type": "str",
+          "value": "general"
+        },
+        {
+          "type": "u32",
+          "value": 1
+        },
+        {
+          "type": "u64",
+          "value": "3"
+        },
+        {
+          "type": "flag",
+          "value": 0
+        },
+        {
+          "type": "u64",
+          "value": "6"
+        },
+        {
+          "type": "digest32",
+          "value": "b27eadb7f202fa06c09ca3b7c14befe7176ac50325badaeb2d777881d4252098"
+        },
+        {
+          "type": "digest32",
+          "value": "8ec1d3e900eaccca9ecf8f3d38112a2e6b50bbedef8eb91a4472ccc196839974"
+        },
+        {
+          "type": "uuid",
+          "value": "0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d0e"
+        },
+        {
+          "type": "u32",
+          "value": 1
+        },
+        {
+          "type": "digest32",
+          "value": "78deab8b80f2fd5f28ddcc7df7bb1e2af50b32be59eb76d6ccdc2b7c3b505c35"
+        }
+      ],
+      "message": "0016636c6f616b2f76312f73656374696f6e2d77726974650192f5a300007aaa8bbb0123456789abafdd515acdcf5c888cb266e7b6db2dd9000b636f6d707574652e7670730192f5a300007aaa8bbb0123456789ab0192f5a47c3e7b1a9d2e5f6a7b8c9d0e00087365727665722d31000767656e6572616c000000010000000000000003000000000000000006b27eadb7f202fa06c09ca3b7c14befe7176ac50325badaeb2d777881d42520988ec1d3e900eaccca9ecf8f3d38112a2e6b50bbedef8eb91a4472ccc1968399740192f5a47c3e7b1a9d2e5f6a7b8c9d0e0000000178deab8b80f2fd5f28ddcc7df7bb1e2af50b32be59eb76d6ccdc2b7c3b505c35",
+      "writeHash": "c982b184e2583c59216539c2c1ba636d58f3c7f3999575d9c37596b0a75efaa8",
+      "signature": "01d90aa4ad07fe5a82e477265012280a98b8e8b65765846b009873e17d9789e04438519b9ffb6431302d86c9a3debc99858710091753c54654087aa644887a8105",
+      "checkpointProofs": [
+        {
+          "checkpointSeq": 7,
+          "size": 2,
+          "inclusion": {
+            "index": 0,
+            "leaf": {
+              "nodeId": "afdd515a-cdcf-5c88-8cb2-66e7b6db2dd9",
+              "sectionName": "general",
+              "dataVersion": 2,
+              "writeHash": "8ec1d3e900eaccca9ecf8f3d38112a2e6b50bbedef8eb91a4472ccc196839974"
+            },
+            "path": [
+              "ad28fcd9bae942f8f82f6098b6ddf167a607148100ad00f916610f29fd85f65a"
+            ]
+          }
+        },
+        {
+          "checkpointSeq": 10,
+          "size": 1,
+          "after": {
+            "index": 0,
+            "leaf": {
+              "nodeId": "afdd515a-cdcf-5c88-8cb2-66e7b6db2dd9",
+              "sectionName": "secrets",
+              "dataVersion": 2,
+              "writeHash": "434bfe248541a8715d1db58bfbecb08238d203bdb6c97942d1e2a6d79bb0fc77"
+            },
+            "path": []
+          }
+        }
+      ],
+      "reason": "fork"
     }
   ],
   "afterDeletion": {

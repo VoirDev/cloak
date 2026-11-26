@@ -9,6 +9,8 @@ import kotlinx.io.bytestring.ByteString
  * @property id Client-generated vault id.
  * @property keyEnvelope Key version 1 sealed to the caller's current keys.
  * @property log The signed `vault_created` entry.
+ * @property acceptance The caller's `vaultAcceptance` of the new vault, signed with the key version
+ *   that signs [log] (`PROTOCOL.md` §9).
  */
 public data class CreateVaultCommand(
     /** Client-generated vault id. */
@@ -17,6 +19,8 @@ public data class CreateVaultCommand(
     public val keyEnvelope: ByteString,
     /** The signed `vault_created` entry. */
     public val log: LogEntryInput,
+    /** The caller's signed acceptance of the vault. */
+    public val acceptance: Acceptance,
 )
 
 /**

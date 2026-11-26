@@ -143,6 +143,44 @@ describe('key statements', () => {
   });
 });
 
+describe('key statements outside their types', () => {
+  const ownerV1 = identityNamed('owner-v1').keys;
+  const statements = objects(IDENTITY, 'statements').map(toStatement);
+  const second = statements.find((statement) => statement.keys.keyVersion === 2);
+  if (second === undefined) throw new Error('statement');
+
+  it.each([
+    ['a key version of 2^32', { keyVersion: 2 ** 32 }],
+    ['an encryption key of 31 bytes', { encryptionPublicKey: new Uint8Array(31) }],
+    ['a recovery signing key of 33 bytes', { recoverySigningPublicKey: new Uint8Array(33) }],
+    ['an uppercase user id', { userId: ownerV1.userId.toUpperCase() }],
+  ] as const)('refuses a statement with %s, without throwing', (_, change) => {
+    expect(verifyKeyStatement({ ...second, keys: { ...second.keys, ...change } }, ownerV1)).toBe(
+      false,
+    );
+  });
+
+  it('refuses a statement that follows a version a u32 cannot hold', () => {
+    const last = { ...ownerV1, keyVersion: 2 ** 32 - 1 };
+    const next = { ...second, keys: { ...second.keys, keyVersion: 2 ** 32 } };
+    expect(verifyKeyStatement(next, last)).toBe(false);
+    expect(followKeyChain(last, [next])).toEqual({
+      ok: false,
+      reason: 'bad_statement',
+      keyVersion: 2 ** 32,
+    });
+  });
+
+  it('breaks the chain at a statement whose keys are not 32 bytes', () => {
+    const short = { ...second, keys: { ...second.keys, signingPublicKey: new Uint8Array(31) } };
+    expect(followKeyChain(ownerV1, [statements[0] ?? second, short])).toEqual({
+      ok: false,
+      reason: 'bad_statement',
+      keyVersion: 2,
+    });
+  });
+});
+
 describe('creating and replacing identity keys', () => {
   it('creates version 1 and replaces it with version 2 signed by the old recovery key', async () => {
     const userId = '0192f5a4-7c3e-7b1a-9d2e-5f6a7b8c9d4c';

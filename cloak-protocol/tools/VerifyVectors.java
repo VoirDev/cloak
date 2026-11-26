@@ -14,6 +14,7 @@ import java.text.Normalizer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -391,8 +392,8 @@ public final class VerifyVectors {
         if (blob.length != 65 || blob[0] != 1) return "bad_signature";
         byte[] signature = Arrays.copyOfRange(blob, 1, 65);
         if (littleEndian(Arrays.copyOfRange(signature, 32, 64)).compareTo(GROUP_ORDER) >= 0) return "non_canonical_signature";
-        if (yOf(Arrays.copyOf(signature, 32)).compareTo(FIELD_PRIME) >= 0) return "non_canonical_signature";
-        if (yOf(publicKey).compareTo(FIELD_PRIME) >= 0) return "non_canonical_key";
+        if (!canonicalPoint(Arrays.copyOf(signature, 32))) return "non_canonical_signature";
+        if (!canonicalPoint(publicKey)) return "non_canonical_key";
         if (smallOrder(publicKey)) return "small_order_key";
         try {
             PublicKey pk = KeyFactory.getInstance("Ed25519").generatePublic(
@@ -430,6 +431,26 @@ public final class VerifyVectors {
         return littleEndian(point).and(BigInteger.ONE.shiftLeft(255).subtract(BigInteger.ONE));
     }
 
+    /** §2: y below p, and no sign bit on a point whose x is 0 (y = 1 or y = p - 1). */
+    private static boolean canonicalPoint(byte[] point) {
+        BigInteger y = yOf(point);
+        boolean signed = (point[31] & 0x80) != 0;
+        return y.compareTo(FIELD_PRIME) < 0
+                && !(signed && (y.equals(BigInteger.ONE) || y.equals(FIELD_PRIME.subtract(BigInteger.ONE))));
+    }
+
+    /** §5.1: an X25519 key is refused with its top bit set, not below p, or of small order. */
+    private static String encryptionKeyReason(byte[] key) {
+        if (key.length != 32 || (key[31] & 0x80) != 0 || littleEndian(key).compareTo(FIELD_PRIME) >= 0) return "non_canonical_key";
+        Set<String> smallOrder = Set.of(
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                "0100000000000000000000000000000000000000000000000000000000000000",
+                "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+                "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+                "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157");
+        return smallOrder.contains(hex(key)) ? "small_order_key" : null;
+    }
+
     private static void verifyIdentity(Map<String, Object> file) throws Exception {
         // §5.0: userId = UUIDv5(userNamespace, UTF-8 host user id).
         String namespace = uuidV5("6ba7b811-9dad-11d1-80b4-00c04fd430c8", "urn:cloak:v1:user".getBytes(StandardCharsets.UTF_8));
@@ -457,6 +478,27 @@ public final class VerifyVectors {
             check("credentials " + statement + " signature",
                     String.valueOf(strictVerify(bytes(signerKeys, "signingPublicKey"), bytes(s, "message"), bytes(s, "signature"))), "null");
         }
+        Map<String, Object> acceptances = map(file.get("acceptances"));
+        Map<String, Object> acceptor = map(acceptances.get("signer"));
+        Map<String, Object> acceptorKeys = null;
+        for (Object o : list(file, "identities")) {
+            Map<String, Object> id = map(o);
+            if (str(id, "userId").equals(str(acceptor, "userId")) && num(id, "keyVersion") == num(acceptor, "keyVersion")) acceptorKeys = id;
+        }
+        Map<String, Object> vaultAcceptance = map(acceptances.get("vault"));
+        check("vault acceptance message",
+                hex(new Canonical().label("cloak/v1/vault-acceptance").uuid(str(acceptor, "userId"))
+                        .u32(num(acceptor, "keyVersion")).uuid(str(vaultAcceptance, "vaultId")).bytes()),
+                str(vaultAcceptance, "message"));
+        Map<String, Object> inviterAcceptance = map(acceptances.get("inviter"));
+        check("inviter acceptance message",
+                hex(new Canonical().label("cloak/v1/inviter-acceptance").uuid(str(acceptor, "userId"))
+                        .u32(num(acceptor, "keyVersion")).uuid(str(inviterAcceptance, "inviterUserId")).bytes()),
+                str(inviterAcceptance, "message"));
+        for (Map<String, Object> s : List.of(vaultAcceptance, inviterAcceptance)) {
+            check("acceptance signature",
+                    String.valueOf(strictVerify(bytes(acceptorKeys, "signingPublicKey"), bytes(s, "message"), bytes(s, "signature"))), "null");
+        }
         for (Object o : list(file, "identities")) {
             Map<String, Object> id = map(o);
             String name = "identity " + id.get("name");
@@ -474,6 +516,26 @@ public final class VerifyVectors {
         for (Object o : list(file, "negatives")) {
             Map<String, Object> n = map(o);
             check("statement refused " + n.get("name"), String.valueOf(statementReason(map(n.get("statement")))), str(n, "reason"));
+        }
+        for (Object o : list(file, "encryptionKeys")) {
+            Map<String, Object> k = map(o);
+            byte[] key = bytes(k, "key");
+            check("encryption key " + str(k, "key"), String.valueOf(encryptionKeyReason(key)), String.valueOf(k.get("reason")));
+            if ("small_order_key".equals(k.get("reason"))) {
+                // The JDK's own X25519 refuses the all-zero secret every small-order point gives.
+                boolean refused = false;
+                try {
+                    javax.crypto.KeyAgreement agreement = javax.crypto.KeyAgreement.getInstance("X25519");
+                    agreement.init(KeyFactory.getInstance("X25519").generatePrivate(
+                            new java.security.spec.PKCS8EncodedKeySpec(concat(HEX.parseHex("302e020100300506032b656e04220420"), new byte[32]))));
+                    agreement.doPhase(KeyFactory.getInstance("X25519").generatePublic(
+                            new X509EncodedKeySpec(concat(HEX.parseHex("302a300506032b656e032100"), key))), true);
+                    agreement.generateSecret();
+                } catch (Exception e) {
+                    refused = true;
+                }
+                check("small-order encryption key refused by the JDK " + str(k, "key"), String.valueOf(refused), "true");
+            }
         }
     }
 
@@ -587,7 +649,12 @@ public final class VerifyVectors {
             if (reason != null) return new String[] {reason, seq};
             if (e.containsKey("checkpoint")) {
                 List<byte[]> hashes = new ArrayList<>();
-                for (Object l : list(c, "checkpointLeaves")) hashes.add(leafHash(leafData(map(l))));
+                Set<String> sections = new HashSet<>();
+                for (Object l : list(c, "checkpointLeaves")) {
+                    // §7.5: at most one leaf per section, whatever the root says.
+                    if (!sections.add(str(map(l), "nodeId") + "/" + str(map(l), "sectionName"))) return new String[] {"bad_checkpoint", seq};
+                    hashes.add(leafHash(leafData(map(l))));
+                }
                 if (!hex(treeHash(hashes)).equals(str(e, "checkpoint"))) return new String[] {"bad_checkpoint", seq};
             }
             previous = sha256(message);
@@ -730,8 +797,12 @@ public final class VerifyVectors {
             check("section ciphertext hash " + name, str(w, "ciphertextHash"),
                     hex(ciphertext == null ? new byte[32] : sha256(ciphertext)));
 
+            // §8.4 rule 1: another hash at `logSeq` is a fork before anything else, head or not.
             Map<String, Object> head = map(log.get((int) num(w, "logSeq") - 1));
-            check("section head hash " + name, str(w, "logHeadHash"), str(head, "entryHash"));
+            if (!str(w, "logHeadHash").equals(str(head, "entryHash"))) {
+                check("section cites another hash at its seq " + name, expected, "fork");
+                continue;
+            }
             boolean isHead = num(map(head.get("entry")), "requestEnd") == 1;
             check("section cites a head " + name, String.valueOf(isHead), String.valueOf(!expected.equals("not_a_head")));
 
@@ -937,6 +1008,8 @@ public final class VerifyVectors {
         Canonical label(String s) { return str(s); }
 
         Canonical str(String s) {
+            // §3: well-formed Unicode only; getBytes would turn a lone surrogate into '?'.
+            if (!StandardCharsets.UTF_8.newEncoder().canEncode(s)) throw new IllegalArgumentException("str is not well-formed Unicode");
             byte[] b = s.getBytes(StandardCharsets.UTF_8);
             out.write(b.length >>> 8);
             out.write(b.length & 0xff);

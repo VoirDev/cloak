@@ -3,6 +3,7 @@ export {
   isCloakCryptoError,
   type CloakCryptoErrorCode,
   type PasswordHasher,
+  type Role,
 } from '@voirdev/cloak-crypto';
 export {
   CloakApiError,
@@ -32,6 +33,7 @@ export {
   type CredentialsResult,
   type IdentityStatus,
   type KeyReplacementResult,
+  type PreparedCredentials,
   type RememberSecretKeyOption,
 } from './client.ts';
 export type {
